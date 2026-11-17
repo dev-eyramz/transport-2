@@ -1535,3 +1535,42 @@ input[type="checkbox"] {
     transition: none;
   }
 }
+
+.admin-foldable > .card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.admin-foldable > .card-header::-webkit-details-marker {
+  display: none;
+}
+
+.admin-foldable > .card-header::after {
+  display: grid;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--card-border);
+  border-radius: 50%;
+  color: var(--text);
+  content: '+';
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.admin-foldable[open] > .card-header::after {
+  border-color: var(--primary);
+  background: var(--primary);
+  content: '−';
+}
+
+.admin-foldable > .card-header:focus-visible {
+  outline: 3px solid var(--input-focus);
+  outline-offset: -3px;
+}

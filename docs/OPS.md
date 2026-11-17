@@ -32,3 +32,9 @@ Drivers enter an expiry date with licence/insurance/roadworthy uploads. Warnings
 - For cash rides, reconcile `fee_receivables` and driver MoMo collections daily. Check pending/NeedsReview collections with the driver before retrying; successful status checks allocate oldest receivables first. Compare settled receivable amounts with `cash_settlement` ledger rows.
 - Record waivers or manual settlements with a reason. When `fee_manual_needs_approval=1`, a different station manager/accountant must approve; review the associated audit entry before closing the reconciliation period.
 - Investigate overdue notifications and outstanding balances before enabling `fee_block_cash`. That option prevents new cash assignments to drivers above `fee_max_outstanding_ghs`; digital dispatch remains unaffected.
+
+## 6. Tenant and terminal setup
+- Sign in through the separate Platform Admin link to create each tenant, its first terminals, directional routes, and per-seat fares. Add later terminals and routes from that tenant's setup card; fare is recorded with each route.
+- Create tenant managers with a tenant scope. A manager assigned only to a station remains station-scoped. Driver and Porter accounts must be assigned to a terminal in the tenant.
+- Migration `011_tenants_and_driver_payout_timing.sql` is applied automatically at startup. Existing stations are retained and backfilled into individual tenant scopes; managers and routes keep their existing station ownership boundaries.
+- Drivers choose their payout timing during onboarding. A tenant/station manager may override it for one driver or clear the override to restore the driver's choice.

@@ -49,6 +49,12 @@ Not included: real SMS gateway, SignalR-style push (UI polls every 20s), passwor
 - Append-only fee ledger, station-scoped accountant role, fee reconciliation/reporting, approval-controlled waivers/manual settlements, and configurable overdue reminders.
 - Configure fee-account Eganow credentials with `FEES_EGANOW_*`. Production startup requires these credentials whenever cash is enabled. See [docs/OPS.md](docs/OPS.md) for reconciliation procedures.
 
+## v1.7 – parent tenants and driver payout timing
+- Platform Admin has a dedicated login link and creates a tenant together with its first terminals, directional routes, and per-seat fares. Additional terminals/routes are created within that tenant.
+- Tenant managers are assigned a tenant; station-scoped managers remain limited to their assigned station. Drivers and Porters remain assigned to a terminal. Tenant-scoped dashboards, reports, audit entries, and route operations stay within that tenant.
+- Drivers select their payout timing during onboarding: after each rider confirms boarding, or after trip completion and manager settlement. A manager can override the selection per driver and clear the override to restore the driver's choice.
+- Migration `011_tenants_and_driver_payout_timing.sql` preserves existing stations and routes, assigns existing stations their own tenant scope, and adds payout preference/override fields. Existing station-level access remains isolated.
+
 ## Platform administration
 - Platform admins have a dedicated settings panel for Eganow, Twilio/HTTP SMS, WhatsApp and SMTP configuration, and existing user/station setup. Provider credentials are encrypted in SQLite with AES-256-GCM using a key derived from `APP_SECRET`; the API only reports whether a secret is configured. Keep `APP_SECRET` unchanged while encrypted settings exist and back up the database securely.
 - Settings entered in the admin panel are applied to the running process and persist in the database. `.env` values remain supported as deployment defaults. Production rejects mock/console providers and non-HTTPS provider URLs. On ephemeral hosts such as Render Free, settings stored in SQLite can be lost when the service restarts; use persistent storage or configure provider variables in the host environment for durable operation.
