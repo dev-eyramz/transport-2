@@ -1,0 +1,14 @@
+.git
+.env
+.env.*
+node_modules
+*.db
+*.db-*
+backups/
+backups-test/
+uploads/
+uploads-test/
+docs/
+README.md
+test.js
+payment.test.js

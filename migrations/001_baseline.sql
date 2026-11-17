@@ -1,0 +1,18 @@
+create table if not exists stations(id integer primary key,name text unique);
+create table if not exists routes(id integer primary key,origin_id int,dest_id int,name text,unique(origin_id,dest_id));
+create table if not exists users(id integer primary key,phone text unique,name text,role text,station_id int,token text,verified int default 0);
+create table if not exists otps(phone text,code text,exp int);
+create table if not exists drivers(user_id int primary key,licence text,verified int default 0,op_status text default 'Available');
+create table if not exists vehicles(id integer primary key,driver_id int,reg text unique,type text,capacity int check(capacity>0),status text default 'Available');
+create table if not exists availability(id integer primary key,driver_id int,dow int,st text,en text);
+create table if not exists avail_ex(id integer primary key,driver_id int,start_at text,end_at text,reason text,status text default 'Pending',reviewed_by int,comment text);
+create table if not exists recurring(id integer primary key,passenger_id int,route_id int,seats int,arrival text,days text,start_date text,end_date text,status text default 'Active');
+create table if not exists confirmations(id integer primary key,rec_id int,week_start text,status text default 'Pending',deadline text,confirmed_at text,idem text,unique(rec_id,week_start));
+create table if not exists bookings(id integer primary key,ref text unique,passenger_id int,route_id int,date text,arrival text,seats int check(seats between 1 and 3),status text,rec_id int,source text,created text,unique(rec_id,date));
+create table if not exists trips(id integer primary key,route_id int,driver_id int,vehicle_id int,dep_at text,status text default 'Planned');
+create table if not exists assignments(id integer primary key,trip_id int,booking_id int,seats int,status text default 'Reserved',method text,score real,by text,reason text,at text);
+create table if not exists excl(id integer primary key,passenger_id int,route_id int,date text,time text,vtype text,status text default 'Pending',manager_id int);
+create table if not exists notifications(id integer primary key,user_id int,event text,msg text,status text default 'Pending',at text);
+create table if not exists history(id integer primary key,booking_id int,old text,new text,by text,reason text,at text);
+create table if not exists audit(id integer primary key,actor int,action text,entity text,eid int,meta text,at text);
+create unique index if not exists one_active on assignments(booking_id) where status in('Reserved','Confirmed','Boarded');

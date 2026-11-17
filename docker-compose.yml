@@ -1,0 +1,24 @@
+services:
+  app:
+    build: .
+    restart: always
+    env_file: .env
+    environment:
+      FEES_EGANOW_BASE_URL: ${FEES_EGANOW_BASE_URL:-}
+      FEES_EGANOW_API_USERNAME: ${FEES_EGANOW_API_USERNAME:-}
+      FEES_EGANOW_API_PASSWORD: ${FEES_EGANOW_API_PASSWORD:-}
+      FEES_EGANOW_X_AUTH: ${FEES_EGANOW_X_AUTH:-}
+      FEES_EGANOW_CALLBACK_URL: ${FEES_EGANOW_CALLBACK_URL:-}
+      FEES_EGANOW_DEFAULT_COUNTRY_CODE: ${FEES_EGANOW_DEFAULT_COUNTRY_CODE:-GH0233}
+      FEES_EGANOW_DEFAULT_LANGUAGE: ${FEES_EGANOW_DEFAULT_LANGUAGE:-en}
+      FEES_EGANOW_MOMO_PARTNERS: ${FEES_EGANOW_MOMO_PARTNERS:-MTNGH,ATGH,TCELGH}
+    volumes: [data:/data]
+  caddy:   # automatic HTTPS (Let's Encrypt) + reverse proxy
+    image: caddy:2
+    restart: always
+    ports: ["80:80","443:443"]
+    environment: [DOMAIN]
+    env_file: .env
+    volumes: [./Caddyfile:/etc/caddy/Caddyfile,caddy:/data]
+    depends_on: [app]
+volumes: {data: {}, caddy: {}}

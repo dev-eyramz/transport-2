@@ -1,0 +1,11 @@
+create table sessions(hash text primary key,user_id int,expires int,created int,revoked int default 0,ua text);
+create index sessions_user on sessions(user_id);
+alter table users add column pin_hash text;
+alter table users add column pin_fails int default 0;
+alter table users add column locked_until int default 0;
+alter table otps add column attempts int default 0;
+alter table notifications add column channel text;
+alter table notifications add column attempts int default 0;
+alter table notifications add column next_try int default 0;
+alter table notifications add column error text;
+alter table notifications add column provider_id text;
