@@ -1,5 +1,5 @@
 // Messaging gateway. Console delivery is reserved for tests.
-const provider=()=>process.env.SMS_PROVIDER||'console';
+const provider=()=>process.env.SMS_PROVIDER||(process.env.NODE_ENV=='production'?'twilio':'console');
 const post=async(url,o)=>{const r=await fetch(url,{...o,signal:AbortSignal.timeout(10000)}),t=await r.text();if(!r.ok)throw new Error(`${provider()} ${r.status}: ${t.slice(0,150)}`);try{return JSON.parse(t)}catch{return{}}};
 const norm=p=>{p=String(p).replace(/[\s-]/g,'');return p.startsWith('+')?p:p.startsWith('0')?(process.env.COUNTRY_CODE||'+233')+p.slice(1):'+'+p};
 const twilioUrl=sid=>{

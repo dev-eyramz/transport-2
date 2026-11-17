@@ -25,13 +25,10 @@ if(PROD&&paymentProviderName=='mock')throw new Error('PAYMENT_PROVIDER=mock is n
 if(gw.provider=='console'&&process.env.NODE_ENV!='test')throw new Error('SMS_PROVIDER=console is only allowed in tests');
 if(paymentProviderName=='mock'&&process.env.NODE_ENV!='test')throw new Error('PAYMENT_PROVIDER=mock is only allowed in tests');
 if(PROD){
- const requireSetting=key=>{if(!process.env[key]?.trim())throw new Error(`${key} must be configured for production`)};
- const requireHttps=key=>{requireSetting(key);let url;try{url=new URL(process.env[key])}catch{throw new Error(`${key} must be a valid URL`)}if(url.protocol!='https:')throw new Error(`${key} must use HTTPS in production`)};
+ const validateHttps=key=>{const value=process.env[key]?.trim();if(!value)return;let url;try{url=new URL(value)}catch{throw new Error(`${key} must be a valid URL`)}if(url.protocol!='https:')throw new Error(`${key} must use HTTPS in production`)};
  if(paymentProviderName!='eganow')throw new Error('PAYMENT_PROVIDER must be eganow in production');
- requireHttps('EGANOW_BASE_URL');for(const key of['EGANOW_API_USERNAME','EGANOW_API_PASSWORD','EGANOW_X_AUTH'])requireSetting(key);
- if(gw.provider=='twilio'){requireHttps('TWILIO_API_BASE_URL');for(const key of['TWILIO_SID','TWILIO_TOKEN','TWILIO_FROM'])requireSetting(key)}
- else if(gw.provider=='http'){requireHttps('SMS_URL');requireSetting('SMS_FROM')}
- else throw new Error('SMS_PROVIDER must be twilio or http in production')
+ if(!['twilio','http'].includes(gw.provider))throw new Error('SMS_PROVIDER must be twilio or http in production');
+ for(const key of['EGANOW_BASE_URL','EGANOW_CALLBACK_URL','TWILIO_API_BASE_URL','SMS_URL'])validateHttps(key)
 }
 const E=(s,m)=>{throw Object.assign(new Error(m),{s})},now=()=>new Date().toISOString().slice(0,16),mins=t=>{const[a,b]=t.split(':');return+a*60+ +b};
 const validDate=d=>typeof d=='string'&&/^\d{4}-\d{2}-\d{2}$/.test(d)&&!Number.isNaN(Date.parse(d+'T00:00:00Z'))&&new Date(d+'T00:00:00Z').toISOString().slice(0,10)==d;
@@ -405,7 +402,7 @@ api.put('/admin/platform-settings',AD,H(req=>{
   next[k]=raw.trim();changed.push(k)
  }
  if(clearSecrets.some(k=>!PLATFORM_SECRET_KEYS.has(k)))E(400,'Invalid secret field to clear');
- const payment=next.PAYMENT_PROVIDER??process.env.PAYMENT_PROVIDER??'eganow',sms=next.SMS_PROVIDER??process.env.SMS_PROVIDER??'console',email=next.EMAIL_PROVIDER??process.env.EMAIL_PROVIDER??'disabled';
+ const payment=next.PAYMENT_PROVIDER??process.env.PAYMENT_PROVIDER??'eganow',sms=next.SMS_PROVIDER??process.env.SMS_PROVIDER??(PROD?'twilio':'console'),email=next.EMAIL_PROVIDER??process.env.EMAIL_PROVIDER??'disabled';
  if(!['eganow','mock'].includes(payment)||!['twilio','http','console'].includes(sms)||!['disabled','smtp'].includes(email))E(400,'Unsupported payment, SMS, or email provider');
  if((payment=='mock'||sms=='console')&&process.env.NODE_ENV!='test')E(400,'Mock payments and console messaging are only allowed in tests');
  const port=Number(next.SMTP_PORT??process.env.SMTP_PORT??'587');if((next.SMTP_PORT??process.env.SMTP_PORT)&&(!Number.isInteger(port)||port<1||port>65535))E(400,'SMTP_PORT must be between 1 and 65535');
@@ -421,7 +418,7 @@ api.put('/admin/platform-settings',AD,H(req=>{
   for(const[k,value]of Object.entries(next))process.env[k]=value;
   for(const k of clearSecrets)delete process.env[k];
   if((next.PAYMENT_PROVIDER||clearSecrets.includes('PAYMENT_PROVIDER'))&&typeof paymentProvider!='undefined'){
-   paymentProvider=createPaymentProvider();if(paymentProvider.name=='eganow')paymentProvider.getBaseUrl();feeProvider=createPaymentProvider(paymentProvider.name,{envPrefix:'FEES_EGANOW'})
+   paymentProvider=createPaymentProvider();feeProvider=createPaymentProvider(paymentProvider.name,{envPrefix:'FEES_EGANOW'})
   }
   db.transaction(()=>{
    for(const[k,value]of Object.entries(next))run('insert into platform_settings(key,value,encrypted) values(?,?,?) on conflict(key) do update set value=excluded.value,encrypted=excluded.encrypted',k,PLATFORM_SECRET_KEYS.has(k)?encryptSetting(value):value,PLATFORM_SECRET_KEYS.has(k)?1:0);
@@ -616,7 +613,6 @@ app.get('/api/v1/events',(req,res)=>{const t=tix.get(req.query.ticket);tix.delet
 app.post('/webhooks/sms-status',express.urlencoded({extended:false}),(req,res)=>{if(!process.env.WEBHOOK_KEY||req.query.key!==process.env.WEBHOOK_KEY)return res.sendStatus(403);
  const st={delivered:'Delivered',failed:'Failed',undelivered:'Failed',sent:'Sent'}[req.body.MessageStatus];if(st)run('update notifications set status=? where provider_id=?',st,req.body.MessageSid);res.sendStatus(204)});
 let paymentProvider = createPaymentProvider(),feeProvider=createPaymentProvider(paymentProvider.name,{envPrefix:'FEES_EGANOW'});
-if(paymentProvider.name=='eganow')paymentProvider.getBaseUrl();
 const cashEnabledSomewhere=()=>cfg('cash_enabled',null,0)==1||q('select id from routes').some(r=>cfg('cash_enabled',r.id,0)==1);
 if(PROD&&cashEnabledSomewhere()){
  if(feeProvider.name!='eganow')throw new Error('Cash-enabled production requires the fee Eganow provider');
