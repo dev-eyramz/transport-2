@@ -25,7 +25,7 @@ Drivers enter an expiry date with licence/insurance/roadworthy uploads. Warnings
 
 ## 5. Fee-account setup and reconciliation
 - Configure `FEES_EGANOW_BASE_URL`, `FEES_EGANOW_API_USERNAME`, `FEES_EGANOW_API_PASSWORD`, and `FEES_EGANOW_X_AUTH` with credentials dedicated to the fee account. Optional callback, country, language, and partner settings use the `FEES_EGANOW_*` prefix. Do not reuse the passenger-collection or driver-payout credentials.
-- Production refuses to start when any effective route enables cash and a required fee-account credential is missing. Set `cash_enabled` to `1` only after verifying the fee account can collect MoMo.
+- Production refuses to start if Eganow or the selected SMS provider is missing required credentials, if a provider URL is not HTTPS, or if any effective route enables cash while a fee-account credential is missing. Set `cash_enabled` to `1` only after verifying the fee account can collect MoMo. Payment mocks and console messaging are restricted to tests.
 - Review `/reports/fees` by date and station. Match digital `rider_charge` and `driver_deduction` entries against provider settlement records; the fee ledger records the charges but does not initiate transfers to the fee account.
 - For cash rides, reconcile `fee_receivables` and driver MoMo collections daily. Check pending/NeedsReview collections with the driver before retrying; successful status checks allocate oldest receivables first. Compare settled receivable amounts with `cash_settlement` ledger rows.
 - Record waivers or manual settlements with a reason. When `fee_manual_needs_approval=1`, a different station manager/accountant must approve; review the associated audit entry before closing the reconciliation period.

@@ -1,4 +1,4 @@
-// Messaging gateway. SMS_PROVIDER = console (dev) | twilio (SMS + WhatsApp) | http (any JSON SMS API)
+// Messaging gateway. Console delivery is reserved for tests.
 const provider=()=>process.env.SMS_PROVIDER||'console';
 const post=async(url,o)=>{const r=await fetch(url,{...o,signal:AbortSignal.timeout(10000)}),t=await r.text();if(!r.ok)throw new Error(`${provider()} ${r.status}: ${t.slice(0,150)}`);try{return JSON.parse(t)}catch{return{}}};
 const norm=p=>{p=String(p).replace(/[\s-]/g,'');return p.startsWith('+')?p:p.startsWith('0')?(process.env.COUNTRY_CODE||'+233')+p.slice(1):'+'+p};
@@ -13,7 +13,7 @@ module.exports={get provider(){return provider()},channel:'sms',get waEnabled(){
  // opts: {channel:'sms'|'whatsapp', event, text}. WhatsApp business-initiated messages need an approved template (TWILIO_WA_TEMPLATE_SID, 2 variables); falls back to SMS on failure.
  async sms(to,body,o={}){to=norm(to);const ch=o.channel||'sms';
   const P=provider();
-  if(P=='console'){console.log(`[${ch.toUpperCase()}->${to}] ${body}`);return{id:null,channel:ch}}
+  if(P=='console'){if(process.env.NODE_ENV!=='test')throw new Error('SMS_PROVIDER=console is only allowed in tests');console.log(`[${ch.toUpperCase()}->${to}] ${body}`);return{id:null,channel:ch}}
   if(P=='twilio'){const send=async wa=>{const w=wa?'whatsapp:':'',f=new URLSearchParams({To:w+to,From:w+(wa?process.env.TWILIO_FROM_WA:process.env.TWILIO_FROM)});
     if(wa&&process.env.TWILIO_WA_TEMPLATE_SID){f.set('ContentSid',process.env.TWILIO_WA_TEMPLATE_SID);f.set('ContentVariables',JSON.stringify({1:String(o.event||'Update').replace(/\s+/g,' '),2:String(o.text||body).replace(/\s+/g,' ')}))}else f.set('Body',body);
     if(process.env.PUBLIC_URL&&process.env.WEBHOOK_KEY)f.set('StatusCallback',`${process.env.PUBLIC_URL}/webhooks/sms-status?key=${process.env.WEBHOOK_KEY}`);

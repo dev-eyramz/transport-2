@@ -264,6 +264,10 @@ class EganowPaymentProvider {
 }
 
 function createPaymentProvider(name = process.env.PAYMENT_PROVIDER || 'eganow', { envPrefix = 'EGANOW' } = {}) {
+  if (name === 'mock' && process.env.NODE_ENV !== 'test') {
+    throw new Error('PAYMENT_PROVIDER=mock is only allowed in tests');
+  }
+
   const providers = {
     eganow: () => new EganowPaymentProvider(envPrefix),
     mock: () => ({

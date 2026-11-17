@@ -19,8 +19,20 @@ const encryptSetting=value=>{const iv=cr.randomBytes(12),cipher=cr.createCipheri
 const decryptSetting=value=>{const[version,iv,tag,data]=String(value).split(':');if(version!='v1'||!iv||!tag||!data)throw new Error('Invalid encrypted platform setting');const decipher=cr.createDecipheriv('aes-256-gcm',settingsKey,Buffer.from(iv,'hex'));decipher.setAuthTag(Buffer.from(tag,'hex'));return Buffer.concat([decipher.update(Buffer.from(data,'hex')),decipher.final()]).toString('utf8')};
 const savedPlatformSettings=()=>q('select key,value,encrypted from platform_settings').map(x=>[x.key,x.encrypted?decryptSetting(x.value):x.value]);
 for(const[k,value]of savedPlatformSettings())if(PLATFORM_SETTING_KEYS.includes(k))process.env[k]=value;
+const paymentProviderName=process.env.PAYMENT_PROVIDER||'eganow';
 if(PROD&&gw.provider=='console')throw new Error('Set SMS_PROVIDER (twilio|http) in production');
-if(PROD&&process.env.PAYMENT_PROVIDER=='mock')throw new Error('PAYMENT_PROVIDER=mock is not allowed in production');
+if(PROD&&paymentProviderName=='mock')throw new Error('PAYMENT_PROVIDER=mock is not allowed in production');
+if(gw.provider=='console'&&process.env.NODE_ENV!='test')throw new Error('SMS_PROVIDER=console is only allowed in tests');
+if(paymentProviderName=='mock'&&process.env.NODE_ENV!='test')throw new Error('PAYMENT_PROVIDER=mock is only allowed in tests');
+if(PROD){
+ const requireSetting=key=>{if(!process.env[key]?.trim())throw new Error(`${key} must be configured for production`)};
+ const requireHttps=key=>{requireSetting(key);let url;try{url=new URL(process.env[key])}catch{throw new Error(`${key} must be a valid URL`)}if(url.protocol!='https:')throw new Error(`${key} must use HTTPS in production`)};
+ if(paymentProviderName!='eganow')throw new Error('PAYMENT_PROVIDER must be eganow in production');
+ requireHttps('EGANOW_BASE_URL');for(const key of['EGANOW_API_USERNAME','EGANOW_API_PASSWORD','EGANOW_X_AUTH'])requireSetting(key);
+ if(gw.provider=='twilio'){requireHttps('TWILIO_API_BASE_URL');for(const key of['TWILIO_SID','TWILIO_TOKEN','TWILIO_FROM'])requireSetting(key)}
+ else if(gw.provider=='http'){requireHttps('SMS_URL');requireSetting('SMS_FROM')}
+ else throw new Error('SMS_PROVIDER must be twilio or http in production')
+}
 const E=(s,m)=>{throw Object.assign(new Error(m),{s})},now=()=>new Date().toISOString().slice(0,16),mins=t=>{const[a,b]=t.split(':');return+a*60+ +b};
 const validDate=d=>typeof d=='string'&&/^\d{4}-\d{2}-\d{2}$/.test(d)&&!Number.isNaN(Date.parse(d+'T00:00:00Z'))&&new Date(d+'T00:00:00Z').toISOString().slice(0,10)==d;
 const validTime=t=>typeof t=='string'&&/^([01]\d|2[0-3]):[0-5]\d$/.test(t);
@@ -373,9 +385,9 @@ api.get('/admin/fees',AD,H(()=>{
 api.put('/admin/fees',AD,H(req=>{
  const scopeValue=String(req.body.scope||'global'),match=scopeValue.match(/^station:([1-9]\d*)$/),validScope=scopeValue=='global'||!!match&&!!one('select 1 x from stations where id=?',+match[1]);
  if(!validScope)E(400,'Scope must be global or station:ID');const values=req.body.values;if(!values||typeof values!='object'||Array.isArray(values))E(400,'Fee percentage values are required');
- const oldValues={},newValues={};for(const key of FEE_CONFIG_KEYS){const value=Number(values[key]);if(!Number.isFinite(value)||value<0||value>100)E(400,`${key} must be between 0 and 100`);oldValues[key]=one('select value from config where scope=? and key=?',scopeValue,key)?.value??null;newValues[key]=String(value)}
+ const oldValues={},oldOverrides={},newValues={};for(const key of FEE_CONFIG_KEYS){const value=Number(values[key]);if(!Number.isFinite(value)||value<0||value>100)E(400,`${key} must be between 0 and 100`);const old=one('select value from config where scope=? and key=?',scopeValue,key)?.value??null;oldOverrides[key]=old;oldValues[key]=Number(old??(scopeValue=='global'?0:cfg(key,null,0)));newValues[key]=String(value)}
  db.transaction(()=>{for(const key of FEE_CONFIG_KEYS)run('insert into config(scope,key,value) values(?,?,?) on conflict(scope,key) do update set value=excluded.value',scopeValue,key,newValues[key]);
-  audit(req.u.id,'fees.configure','config',0,{scope:scopeValue,oldValues,newValues})})();
+  audit(req.u.id,'fees.configure','config',0,{scope:scopeValue,oldValues,oldOverrides,newValues})})();
  return{ok:1}
 }));
 api.get('/admin/platform-settings',AD,H(()=>({
@@ -395,7 +407,7 @@ api.put('/admin/platform-settings',AD,H(req=>{
  if(clearSecrets.some(k=>!PLATFORM_SECRET_KEYS.has(k)))E(400,'Invalid secret field to clear');
  const payment=next.PAYMENT_PROVIDER??process.env.PAYMENT_PROVIDER??'eganow',sms=next.SMS_PROVIDER??process.env.SMS_PROVIDER??'console',email=next.EMAIL_PROVIDER??process.env.EMAIL_PROVIDER??'disabled';
  if(!['eganow','mock'].includes(payment)||!['twilio','http','console'].includes(sms)||!['disabled','smtp'].includes(email))E(400,'Unsupported payment, SMS, or email provider');
- if(PROD&&(payment=='mock'||sms=='console'))E(400,'Mock payments and console messaging are not allowed in production');
+ if((payment=='mock'||sms=='console')&&process.env.NODE_ENV!='test')E(400,'Mock payments and console messaging are only allowed in tests');
  const port=Number(next.SMTP_PORT??process.env.SMTP_PORT??'587');if((next.SMTP_PORT??process.env.SMTP_PORT)&&(!Number.isInteger(port)||port<1||port>65535))E(400,'SMTP_PORT must be between 1 and 65535');
  for(const key of['EGANOW_BASE_URL','EGANOW_CALLBACK_URL','TWILIO_API_BASE_URL','SMS_URL']){
   const value=next[key]??process.env[key];if(!value)continue;
@@ -404,19 +416,19 @@ api.put('/admin/platform-settings',AD,H(req=>{
  }
  if(settings.NOTIFY_CHANNEL&&!['sms','whatsapp'].includes(settings.NOTIFY_CHANNEL))E(400,'NOTIFY_CHANNEL must be sms or whatsapp');
  if(settings.EMAIL_PROVIDER=='smtp'&&(!settings.SMTP_HOST&&!process.env.SMTP_HOST))E(400,'Configure SMTP_HOST before selecting SMTP');
- const prior={};for(const k of [...changed,...clearSecrets])prior[k]=process.env[k];const priorPaymentProvider=paymentProvider;
+ const prior={};for(const k of [...changed,...clearSecrets])prior[k]=process.env[k];const priorPaymentProvider=paymentProvider,priorFeeProvider=feeProvider;
  try{
   for(const[k,value]of Object.entries(next))process.env[k]=value;
   for(const k of clearSecrets)delete process.env[k];
   if((next.PAYMENT_PROVIDER||clearSecrets.includes('PAYMENT_PROVIDER'))&&typeof paymentProvider!='undefined'){
-   paymentProvider=createPaymentProvider();if(paymentProvider.name=='eganow')paymentProvider.getBaseUrl()
+   paymentProvider=createPaymentProvider();if(paymentProvider.name=='eganow')paymentProvider.getBaseUrl();feeProvider=createPaymentProvider(paymentProvider.name,{envPrefix:'FEES_EGANOW'})
   }
   db.transaction(()=>{
    for(const[k,value]of Object.entries(next))run('insert into platform_settings(key,value,encrypted) values(?,?,?) on conflict(key) do update set value=excluded.value,encrypted=excluded.encrypted',k,PLATFORM_SECRET_KEYS.has(k)?encryptSetting(value):value,PLATFORM_SECRET_KEYS.has(k)?1:0);
    for(const k of clearSecrets)run('delete from platform_settings where key=?',k);
    audit(req.u.id,'platform.settings','platform',0,{settings:changed,clearedSecrets:clearSecrets})
   })()
- }catch(e){for(const k of [...changed,...clearSecrets]){if(prior[k]===undefined)delete process.env[k];else process.env[k]=prior[k]}paymentProvider=priorPaymentProvider;throw e}
+ }catch(e){for(const k of [...changed,...clearSecrets]){if(prior[k]===undefined)delete process.env[k];else process.env[k]=prior[k]}paymentProvider=priorPaymentProvider;feeProvider=priorFeeProvider;throw e}
  return{ok:1}
 }));
 api.get('/reports/daily-operations',mgr,H(req=>{const ids=scope(req.u).join(',')||0;return rep(req,q(`select substr(t.dep_at,1,10) day,t.status,count(*) trips from trips t join routes r on r.id=t.route_id where r.id in(${ids}) group by 1,2`))}));
@@ -464,7 +476,7 @@ function reserveExcl(x,b){const dep=mins(x.time);let v;
 api.get('/stations',H(()=>q('select * from stations')));
 api.get('/config',H(req=>{const rows=q('select * from config');if(req.u.role=='admin')return rows;if(!STATION_STAFF.includes(req.u.role)||!req.u.station_id)return[];const routes=scope(req.u);return rows.filter(c=>c.scope=='station:'+req.u.station_id||c.scope.startsWith('route:')&&routes.includes(+c.scope.slice(6)))}));
 api.get('/manager/fares',mgr,H(req=>q('select * from routes').filter(r=>scope(req.u).includes(r.id)).map(r=>({...r,fare_ghs:cfg('fare_ghs',r.id,null),payout_gate:cfg('payout_gate',r.id,'manager_completion'),station_fee_pct:cfg('station_fee_pct',r.id,0)}))));
-api.put('/manager/routes/:id/fare',mgr,H(req=>{const routeId=+req.params.id,{fareGhs,payoutGate}=req.body;inScope(req.u,routeId);
+api.put('/manager/routes/:id/fare',mgr,H(req=>{const routeId=+req.params.id,{fareGhs,payoutGate}=req.body;inScope(req.u,routeId);if(Object.hasOwn(req.body,'platformFeePct'))E(400,'Configure charge percentages through the admin fees panel');
  const fare=Number(fareGhs);if(!Number.isFinite(fare)||toPesewas(fare)<=0||fare>100000||!['onboard','manager_completion'].includes(payoutGate))E(400,'Fare must be positive and payout gate must be selected');
  db.transaction(()=>{for(const[k,value]of[['fare_ghs',fare.toFixed(2)],['payout_gate',payoutGate]])run('insert into config(scope,key,value) values(?,?,?) on conflict(scope,key) do update set value=excluded.value','route:'+routeId,k,value);
   audit(req.u.id,'fare.configure','route',routeId,{fareGhs:fare,payoutGate})})();return{ok:1}}));
@@ -474,6 +486,7 @@ api.put('/config',mgr,H(req=>{const{scope:s,key,value}=req.body,u=req.u;if(FEE_C
  if(['cash_enabled','fee_manual_needs_approval','fee_block_cash'].includes(key)&&![0,1].includes(Number(value)))E(400,`${key} must be 0 or 1`);
  const[k,id]=String(s).split(':'),numericId=/^[1-9]\d*$/.test(id||''),ok=s=='global'?u.role=='admin':k=='station'?numericId&&!!one('select 1 x from stations where id=?',+id)&&(u.role=='admin'||STATION_STAFF.includes(u.role)&&!!u.station_id&&u.station_id==id):k=='route'?numericId&&scope(u).includes(+id):false;if(!ok)E(403,'Scope not allowed');
  if(['fee_due_hours','fee_max_outstanding_ghs','fee_manual_needs_approval'].includes(key)&&u.role!='admin')E(403,'This fee policy is admin-only');
+ if(key=='cash_enabled'&&Number(value)==1&&PROD)for(const suffix of['BASE_URL','API_USERNAME','API_PASSWORD','X_AUTH'])if(!process.env['FEES_EGANOW_'+suffix])E(400,`FEES_EGANOW_${suffix} must be configured before enabling cash`);
  run('insert into config values(?,?,?) on conflict(scope,key) do update set value=excluded.value',s,key,String(value));audit(u.id,'config.set','config',0,req.body);return{ok:1}}));
 api.patch('/bookings/:id',P,H(req=>db.transaction(()=>{const b=one('select * from bookings where id=? and passenger_id=?',req.params.id,req.u.id);if(!b)E(404,'Not found');if(!['Queued','Assigned','Confirmed'].includes(b.status))E(409,'Cannot edit at this stage');
  if(b.paid_pesewas>0||b.payment_status=='Credit')E(409,'Paid bookings cannot be edited; contact the station manager to request a fare adjustment.');
@@ -498,7 +511,7 @@ api.post('/documents',DR,H(req=>{const{vehicleId,kind,filename,contentBase64,exp
  const buf=Buffer.from(contentBase64||'','base64');if(!buf.length||buf.length>4e6)E(400,'File empty or over 4MB');const f=cr.randomBytes(12).toString('hex')+ext;fs.writeFileSync(path.join(UP,f),buf);
  return{id:run('insert into docs(owner_id,vehicle_id,kind,filename,path,at,expires_on) values(?,?,?,?,?,?,?)',req.u.id,vehicleId||null,kind,filename,f,now(),expiresOn||null).lastInsertRowid,status:'Pending'}}));
 api.get('/documents',DR,H(r=>q('select id,kind,vehicle_id,filename,status,note from docs where owner_id=?',r.u.id)));
-api.get('/documents/:id/file',H((req,res)=>{const d=one('select * from docs where id=?',req.params.id);if(!d||(d.owner_id!=req.u.id&&!['manager','admin'].includes(req.u.role)))E(404,'Not found');if(req.u.role=='manager')chkDrv(req.u,d.owner_id);res.sendFile(path.join(UP,d.path))}));
+api.get('/documents/:id/file',H((req,res)=>{const d=one('select * from docs where id=?',req.params.id);if(!d||(d.owner_id!=req.u.id&&!['manager','accountant','admin'].includes(req.u.role)))E(404,'Not found');if(STATION_STAFF.includes(req.u.role))chkDrv(req.u,d.owner_id);res.sendFile(path.join(UP,d.path))}));
 ['verify','reject'].forEach(a=>api.post('/manager/documents/:id/'+a,mgr,H(req=>{const d=one('select * from docs where id=?',req.params.id);if(!d)E(404,'Not found');chkDrv(req.u,d.owner_id);if(a=='verify'&&d.expires_on&&d.expires_on<=now().slice(0,10))E(409,'Document already expired');
  run('update docs set status=?,reviewed_by=?,note=? where id=?',a=='verify'?'Verified':'Rejected',req.u.id,req.body.note||'',d.id);notify(d.owner_id,'Document',`Your ${d.kind} document was ${a=='verify'?'verified':'rejected'}.`);audit(req.u.id,'doc.'+a,'doc',d.id);return{ok:1}})));
 api.post('/manager/vehicles/:id/verify',mgr,H(req=>{const v=one('select * from vehicles where id=?',req.params.id);if(!v)E(404,'Not found');chkDrv(req.u,v.driver_id);
@@ -532,7 +545,8 @@ api.post('/manager/bookings/:id/assign',mgr,H(req=>db.transaction(()=>{const{tri
  if(b.route_id!=t.route_id)E(409,'Route mismatch');if(t.exclusive_for)E(409,'Trip is reserved for a full-vehicle request');if(!['Planned','Loading'].includes(t.status))E(409,'Trip not open');if(!['Queued','Assigned','Confirmed'].includes(b.status))E(409,'Booking cannot be moved');
  run("update assignments set status='Reassigned' where booking_id=? and status in"+ACTIVE,b.id);assign(t,b,'Manual',req.u.id,reason);if(seatLabel)run('update assignments set seat_label=? where booking_id=? and status in'+ACTIVE,String(seatLabel).slice(0,10),b.id);
  audit(req.u.id,'booking.manual-assign','booking',b.id,{tripId,reason});return{ok:1}})()));
-const stText=b=>b.status=='Queued'&&b.payment_status=='Due'?'Payment required before dispatch allocation.':b.status=='Queued'?`Waiting for a vehicle. Queue position ${b.queue_pos} for this route and day. We will message you when one is assigned.`:['Assigned','Confirmed'].includes(b.status)&&b.dep_at?`${b.trip_status=='Delayed'?'DELAYED. ':''}Estimated departure ${b.dep_at.slice(11)} (${b.reg||'vehicle'}${b.seat_label?', seat '+b.seat_label:''}). Estimate only, not a guarantee. Be at the station by ${b.arrival}.`:b.status=='Boarded'?'On board.':b.status=='NoShow'?'Marked as no-show.':'';
+const bookingStatusText=b=>b.status=='Queued'&&b.payment_status=='Due'?'Payment required before dispatch allocation.':b.status=='Queued'?`Waiting for a vehicle. Queue position ${b.queue_pos} for this route and day. We will message you when one is assigned.`:['Assigned','Confirmed'].includes(b.status)&&b.dep_at?`${b.trip_status=='Delayed'?'DELAYED. ':''}Estimated departure ${b.dep_at.slice(11)} (${b.reg||'vehicle'}${b.seat_label?', seat '+b.seat_label:''}). Estimate only, not a guarantee. Be at the station by ${b.arrival}.`:b.status=='Boarded'?'On board.':b.status=='NoShow'?'Marked as no-show.':'';
+const stText=b=>{const info=bookingStatusText(b);return b.payment_method=='cash'&&!['Cancelled','NoShow'].includes(b.status)?`Pay the driver in cash when boarding.${info?' '+info:''}`:info};
 function reminders(){const t0=Date.now();
  const utcMs=(value)=>new Date((value&&value.includes('Z'))?value:value+':00Z').getTime();
  for(const c of q("select c.*,r.passenger_id from confirmations c join recurring r on r.id=c.rec_id where c.status='Pending' and r.status='Active'")){const left=(utcMs(c.deadline)-t0)/36e5;if(left<=0)continue;
@@ -754,7 +768,7 @@ api.get('/manager/fees',mgr,H(req=>{
 }));
 api.post('/manager/fees/receivables/:id/adjust',mgr,H(req=>{
  const r=one('select * from fee_receivables where id=?',req.params.id);if(!r)E(404,'Receivable not found');inFeeScope(req.u,r.station_id);
- const kind=String(req.body.kind||''),reason=String(req.body.reason||'').trim(),raw=String(req.body.amountGhs??'');if(!['waiver','manual_settlement'].includes(kind)||!reason||!/^(?:0|[1-9]\\d*)(?:\\.\\d{1,2})?$/.test(raw))E(400,'A valid action, amount and reason are required');
+ const kind=String(req.body.kind||''),reason=String(req.body.reason||'').trim(),raw=String(req.body.amountGhs??'');if(!['waiver','manual_settlement'].includes(kind)||!reason||!/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(raw))E(400,'A valid action, amount and reason are required');
  const amount=toPesewas(raw),balance=feeReceivableBalances(r.id);if(amount<=0||amount>balance.outstanding_pesewas)E(400,'Amount must be positive and no greater than the receivable balance');
  const pending=cfg('fee_manual_needs_approval',null,0)==1,created=now(),id=db.transaction(()=>{
   const adjustmentId=run('insert into fee_adjustments(receivable_id,kind,amount_pesewas,reason,recorded_by,status,created_at,updated_at) values(?,?,?,?,?,?,?,?)',r.id,kind,amount,reason,req.u.id,pending?'Pending':'Applied',created,created).lastInsertRowid;
@@ -780,6 +794,6 @@ const bk=require('./backup'),BK=path.resolve(process.env.BACKUP_DIR||'backups'),
 if(require.main===module){setInterval(()=>{try{jobs();lastJob=Date.now()}catch(e){console.error(e)}},+process.env.JOB_MS||10000);
  setInterval(()=>conns.forEach(s=>s.forEach(c=>c.res.write(': ping\n\n'))),25000).unref();
  const doBackup=()=>backup().then(f=>{console.log('backup',f);if(process.env.BACKUP_PING_URL)fetch(process.env.BACKUP_PING_URL).catch(()=>{})},e=>{console.error('BACKUP FAILED',e);alertOps('backup','BACKUP FAILED: '+e.message)});setInterval(doBackup,(+process.env.BACKUP_EVERY_H||6)*36e5).unref();setTimeout(doBackup,5000).unref();setInterval(retention,864e5).unref();setTimeout(retention,9000).unref();setInterval(expiryCheck,36e5).unref();setTimeout(expiryCheck,12000).unref();setInterval(watchdog,3e5).unref();
- const srv=app.listen(process.env.PORT||3000,()=>console.log('Transport system on :'+(process.env.PORT||3000)+(PROD?'':' (DEV mode: OTP echoed, console SMS)')));
+ const srv=app.listen(process.env.PORT||3000,()=>console.log('Transport system on :'+(process.env.PORT||3000)+(process.env.NODE_ENV=='test'?' (TEST mode: OTP echoed, console SMS)':PROD?'':' (DEV mode)')));
  for(const s of['SIGTERM','SIGINT'])process.on(s,()=>{srv.close(()=>{db.close();process.exit(0)});setTimeout(()=>process.exit(1),8000).unref()})}
 module.exports={app,jobs,db,backup,outbox,reminders,retention,noshowRule,expiryCheck,alertOps,health};

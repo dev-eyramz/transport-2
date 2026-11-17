@@ -22,6 +22,7 @@ pnpm-debug.log*
 # Local and temporary files
 .DS_Store
 Thumbs.db
+Desktop.ini
 *.swp
 *.tmp
 
@@ -35,20 +36,11 @@ Thumbs.db
 .stylelintcache
 *.tsbuildinfo
 
-# Test files
-*.test.*
-*.spec.*
-**/*.test.*
-**/*.spec.*
-**/__tests__/
-**/test/
-**/tests/
 # Test and development output
 playwright-report/
 test-results/
 blob-report/
 .nyc_output/
-$CURSOR$
 # Test databases
 test.db
 test.sqlite
@@ -59,6 +51,16 @@ tests.sqlite3
 *.test.db
 *.test.sqlite
 *.test.sqlite3
-*.sqlite
-*.sqlite3
+
+# Local runtime data; never commit deployment state or user uploads
 *.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+backups/
+backups-test/
+uploads/
+uploads-test/
+restored-test.db*
