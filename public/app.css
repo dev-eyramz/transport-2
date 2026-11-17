@@ -1447,7 +1447,8 @@ input[type="checkbox"] {
   font-weight: 750;
 }
 
-.app-dialog-field input:not([type="checkbox"]) {
+.app-dialog-field input:not([type="checkbox"]),
+.app-dialog-field select {
   width: 100%;
   min-height: 46px;
   padding: 10px 12px;
@@ -1458,7 +1459,8 @@ input[type="checkbox"] {
   font: inherit;
 }
 
-.app-dialog-field input:focus {
+.app-dialog-field input:focus,
+.app-dialog-field select:focus {
   border-color: #087f8c;
   outline: 3px solid rgba(8, 127, 140, .15);
 }

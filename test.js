@@ -9,6 +9,7 @@ const homeResponse=await fetch(origin+'/'),home=await homeResponse.text(),csp=ho
 let otpIp=1;const call=async(p,m='GET',b,t)=>{const headers={'Content-Type':'application/json',Authorization:'Bearer '+t};if(p=='/auth/request-otp')headers['X-Forwarded-For']=`198.51.100.${otpIp++}`;const r=await fetch(B+p,{method:m,headers,body:b&&JSON.stringify(b)});return{s:r.status,j:await r.json()}};
 const feeFields=value=>Array.isArray(value)?value.flatMap(feeFields):value&&typeof value=='object'?Object.entries(value).flatMap(([k,v])=>[/fee|pct|fare_pesewas/i.test(k)?k:null,...feeFields(v)].filter(Boolean)):[];
 const assertPassengerSafe=value=>assert.deepEqual(feeFields(value),[],'passenger JSON must not expose charge breakdown fields');
+assert.ok(!/placeholder=["'][^"']*(?:User ID|Driver user id|Vehicle id)|label:\s*['"]Trip ID/i.test(appScript),'user-facing forms do not require internal record IDs');
 const login=async(phone,name,role,pin='654321')=>{const o=await call('/auth/request-otp','POST',{phone,name,role,consent:true});return(await call('/auth/verify-otp','POST',{phone,code:o.j.devOtp,pin})).j};
 const A=(await login(process.env.SEED_ADMIN_PHONE,0,0,process.env.SEED_ADMIN_PIN)).token;
 assert.equal((await call('/auth/login','POST',{phone:process.env.SEED_ADMIN_PHONE,pin:process.env.SEED_ADMIN_PIN,portal:'manager'})).s,403,'platform admins cannot enter the station-manager portal');
