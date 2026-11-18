@@ -16,10 +16,15 @@ function driverDeductions(farePesewas, stationPct, platformPct) {
   };
 }
 
+function percentageCharge(farePesewas, percentage) {
+  return percentCharge(farePesewas, percentage);
+}
+
 function totalDue(booking) {
   return Number(booking.fare_pesewas || 0)
     + Number(booking.station_fee_pesewas || 0)
-    + Number(booking.platform_fee_pesewas || 0);
+    + Number(booking.platform_fee_pesewas || 0)
+    + Number(booking.loading_fee_pesewas || 0);
 }
 
-module.exports = { riderCharges, driverDeductions, totalDue };
+module.exports = { riderCharges, driverDeductions, percentageCharge, totalDue };

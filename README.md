@@ -49,15 +49,19 @@ Not included: real SMS gateway, SignalR-style push (UI polls every 20s), passwor
 - Append-only fee ledger, station-scoped accountant role, fee reconciliation/reporting, approval-controlled waivers/manual settlements, and configurable overdue reminders.
 - Configure fee-account Eganow credentials with `FEES_EGANOW_*`. Production startup requires these credentials whenever cash is enabled. See [docs/OPS.md](docs/OPS.md) for reconciliation procedures.
 
-## v1.7 – parent tenants and driver payout timing
-- Platform Admin has a dedicated login link and creates a tenant together with its first terminals, directional routes, and per-seat fares. Additional terminals/routes are created within that tenant.
-- Tenant managers are assigned a tenant; station-scoped managers remain limited to their assigned station. Drivers and Porters remain assigned to a terminal. Tenant-scoped dashboards, reports, audit entries, and route operations stay within that tenant.
+## Tenant stations, organizations, and fee allocation
+- A tenant represents a major station/location; terminals belong to that tenant. Organizations/unions can operate across one or more tenants.
+- Organizations own routes and set fares. An organization can serve the same origin/destination pair as another organization. Tenant managers add terminals; organization managers create routes and fares.
+- Tenant-scoped rates configure station/platform fees; organization-scoped rates configure loading fees. Fee payer shares are configurable by fee type and rider-charge/driver-deduction stream, and each booking snapshots the applicable allocation.
+- Daily settlement balances group amounts due between configured payers and recipients. Recording a settlement logs the payment and reference; it does not initiate a bank or mobile-money transfer.
+- Migration `012_organizations_and_fee_allocations.sql` adds the organization/tenant relationships, fee allocations, and settlement records while preserving existing station and route data.
+- Tenant managers are assigned a tenant; station-scoped managers remain limited to their assigned station. Drivers and Porters remain assigned to a terminal. Tenant- and organization-scoped dashboards, reports, audit entries, and route operations stay within their scope.
 - Drivers select their payout timing during onboarding: after each rider confirms boarding, or after trip completion and manager settlement. A manager can override the selection per driver and clear the override to restore the driver's choice.
-- Migration `011_tenants_and_driver_payout_timing.sql` preserves existing stations and routes, assigns existing stations their own tenant scope, and adds payout preference/override fields. Existing station-level access remains isolated.
+- Migration `011_tenants_and_driver_payout_timing.sql` preserves existing stations and routes, assigns existing stations their own tenant scope, and adds payout preference/override fields.
 
 ## Platform administration
 - Platform admins have a dedicated settings panel for Eganow, Twilio/HTTP SMS, WhatsApp and SMTP configuration, and existing user/station setup. Provider credentials are encrypted in SQLite with AES-256-GCM using a key derived from `APP_SECRET`; the API only reports whether a secret is configured. Keep `APP_SECRET` unchanged while encrypted settings exist and back up the database securely.
 - Settings entered in the admin panel are applied to the running process and persist in the database. `.env` values remain supported as deployment defaults. Production rejects mock/console providers and non-HTTPS provider URLs. On ephemeral hosts such as Render Free, settings stored in SQLite can be lost when the service restarts; use persistent storage or configure provider variables in the host environment for durable operation.
-- Fee percentage settings are maintained in the admin “Fees & charges” card and apply to new bookings only. The quote endpoint and passenger screens expose one total rather than a breakdown.
+- Fee percentage settings are maintained in the admin “Fees & charges” card and apply to new bookings only. Fee payer shares are configured separately by platform, tenant, or organization scope. The quote endpoint and passenger screens expose one total rather than a breakdown.
 - SMTP settings can be managed by an admin, but user notifications are currently delivered through the SMS/WhatsApp notification pipeline; email delivery is not yet attached to user accounts.
 

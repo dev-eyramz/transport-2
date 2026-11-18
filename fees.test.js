@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { riderCharges, driverDeductions, totalDue } = require('./fees');
+const { riderCharges, driverDeductions, percentageCharge, totalDue } = require('./fees');
 
 test('charges round each percentage line to integer pesewas', () => {
   assert.deepEqual(riderCharges(101, 12.5, 12.5), {
@@ -34,4 +34,14 @@ test('tiny fares round independently and totalDue adds stored lines', () => {
     station_fee_pesewas: 0,
     platform_fee_pesewas: 1,
   }), 2);
+});
+
+test('loading fees are included in totals and round to pesewas', () => {
+  assert.equal(percentageCharge(101, 12.5), 13);
+  assert.equal(totalDue({
+    fare_pesewas: 1000,
+    station_fee_pesewas: 50,
+    platform_fee_pesewas: 25,
+    loading_fee_pesewas: 75,
+  }), 1150);
 });

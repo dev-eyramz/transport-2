@@ -33,8 +33,10 @@ Drivers enter an expiry date with licence/insurance/roadworthy uploads. Warnings
 - Record waivers or manual settlements with a reason. When `fee_manual_needs_approval=1`, a different station manager/accountant must approve; review the associated audit entry before closing the reconciliation period.
 - Investigate overdue notifications and outstanding balances before enabling `fee_block_cash`. That option prevents new cash assignments to drivers above `fee_max_outstanding_ghs`; digital dispatch remains unaffected.
 
-## 6. Tenant and terminal setup
-- Sign in through the separate Platform Admin link to create each tenant, its first terminals, directional routes, and per-seat fares. Add later terminals and routes from that tenant's setup card; fare is recorded with each route.
-- Create tenant managers with a tenant scope. A manager assigned only to a station remains station-scoped. Driver and Porter accounts must be assigned to a terminal in the tenant.
-- Migration `011_tenants_and_driver_payout_timing.sql` is applied automatically at startup. Existing stations are retained and backfilled into individual tenant scopes; managers and routes keep their existing station ownership boundaries.
+## 6. Tenant, organization, and fee setup
+- Treat each major station/location as a tenant and create its terminals under that tenant. The terminal list includes both the major station and its smaller pickup/destination stations.
+- Create organizations/unions and link each to the tenant stations where it operates. Organizations—not tenants—own routes and set fares. Organization managers create routes from a tenant they serve; tenant managers can add terminals but do not set organization fares.
+- Configure station/platform rate defaults or overrides at tenant scope and loading rates at organization scope. Configure payer shares separately: platform shares are global, station shares are global or tenant-scoped, and loading shares are global or organization-scoped. Shares must total 100% for each fee and charge stream.
+- Review the daily fee settlement balances by service date. A recorded settlement logs the parties, amount, and optional reference; it does not initiate a transfer. Reconcile those records against actual payment/provider evidence before closing the day.
+- Migrations `011_tenants_and_driver_payout_timing.sql` and `012_organizations_and_fee_allocations.sql` are applied automatically at startup. They preserve existing station and route data while adding tenant/organization relationships, fee allocations, and settlement records.
 - Drivers choose their payout timing during onboarding. A tenant/station manager may override it for one driver or clear the override to restore the driver's choice.
