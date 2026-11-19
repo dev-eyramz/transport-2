@@ -8,28 +8,33 @@ const db=new D(process.env.DB||'transport.db');db.pragma('journal_mode=WAL');db.
 const DUR=+process.env.TRIP_MIN||60,CUTOFF=+process.env.CUTOFF_MIN||30,SURGE_SEATS=+process.env.SURGE_SEATS||4,SURGE_WAIT=+process.env.SURGE_WAIT||30;
 require('./migrate')(db);
 const q=(s,...a)=>db.prepare(s).all(...a),one=(s,...a)=>db.prepare(s).get(...a),run=(s,...a)=>db.prepare(s).run(...a);
-const PLATFORM_SETTING_KEYS=[
+const TENANT_SETTING_KEYS=[
  'PAYMENT_PROVIDER','EGANOW_BASE_URL','EGANOW_API_USERNAME','EGANOW_API_PASSWORD','EGANOW_X_AUTH','EGANOW_CALLBACK_URL',
- 'EGANOW_DEFAULT_COUNTRY_CODE','EGANOW_DEFAULT_LANGUAGE','EGANOW_MOMO_PARTNERS','SMS_PROVIDER','TWILIO_SID','TWILIO_TOKEN',
- 'TWILIO_FROM','TWILIO_API_BASE_URL','NOTIFY_CHANNEL','WEBHOOK_KEY','TWILIO_FROM_WA','TWILIO_WA_TEMPLATE_SID',
- 'SMS_URL','SMS_AUTH','SMS_FROM','EMAIL_PROVIDER','SMTP_HOST','SMTP_PORT','SMTP_USER','SMTP_PASSWORD','SMTP_FROM'
-],PLATFORM_SECRET_KEYS=new Set(['EGANOW_API_PASSWORD','EGANOW_X_AUTH','TWILIO_TOKEN','WEBHOOK_KEY','SMS_AUTH','SMTP_PASSWORD']);
+ 'SMS_PROVIDER','TWILIO_SID','TWILIO_TOKEN','TWILIO_FROM','TWILIO_API_BASE_URL','NOTIFY_CHANNEL','WEBHOOK_KEY','TWILIO_FROM_WA',
+ 'TWILIO_WA_TEMPLATE_SID','SMS_URL','SMS_AUTH','SMS_FROM','EMAIL_PROVIDER','SMTP_HOST','SMTP_PORT','SMTP_USER','SMTP_PASSWORD','SMTP_FROM'
+],TENANT_SECRET_KEYS=new Set(['EGANOW_API_PASSWORD','EGANOW_X_AUTH','TWILIO_TOKEN','WEBHOOK_KEY','SMS_AUTH','SMTP_PASSWORD']);
 const settingsKey=cr.hkdfSync('sha256',Buffer.from(SECRET),'platform-settings','v1',32);
 const encryptSetting=value=>{const iv=cr.randomBytes(12),cipher=cr.createCipheriv('aes-256-gcm',settingsKey,iv),data=Buffer.concat([cipher.update(String(value),'utf8'),cipher.final()]);return['v1',iv.toString('hex'),cipher.getAuthTag().toString('hex'),data.toString('hex')].join(':')};
 const decryptSetting=value=>{const[version,iv,tag,data]=String(value).split(':');if(version!='v1'||!iv||!tag||!data)throw new Error('Invalid encrypted platform setting');const decipher=cr.createDecipheriv('aes-256-gcm',settingsKey,Buffer.from(iv,'hex'));decipher.setAuthTag(Buffer.from(tag,'hex'));return Buffer.concat([decipher.update(Buffer.from(data,'hex')),decipher.final()]).toString('utf8')};
-const savedPlatformSettings=()=>q('select key,value,encrypted from platform_settings').map(x=>[x.key,x.encrypted?decryptSetting(x.value):x.value]);
-for(const[k,value]of savedPlatformSettings())if(PLATFORM_SETTING_KEYS.includes(k))process.env[k]=value;
-const paymentProviderName=process.env.PAYMENT_PROVIDER||'eganow';
-if(PROD&&gw.provider=='console')throw new Error('Set SMS_PROVIDER (twilio|http) in production');
-if(PROD&&paymentProviderName=='mock')throw new Error('PAYMENT_PROVIDER=mock is not allowed in production');
-if(gw.provider=='console'&&process.env.NODE_ENV!='test')throw new Error('SMS_PROVIDER=console is only allowed in tests');
-if(paymentProviderName=='mock'&&process.env.NODE_ENV!='test')throw new Error('PAYMENT_PROVIDER=mock is only allowed in tests');
-if(PROD){
- const validateHttps=key=>{const value=process.env[key]?.trim();if(!value)return;let url;try{url=new URL(value)}catch{throw new Error(`${key} must be a valid URL`)}if(url.protocol!='https:')throw new Error(`${key} must use HTTPS in production`)};
- if(paymentProviderName!='eganow')throw new Error('PAYMENT_PROVIDER must be eganow in production');
- if(!['twilio','http'].includes(gw.provider))throw new Error('SMS_PROVIDER must be twilio or http in production');
- for(const key of['EGANOW_BASE_URL','EGANOW_CALLBACK_URL','TWILIO_API_BASE_URL','SMS_URL'])validateHttps(key)
-}
+let paymentProviderOverride=null;
+const tenantProviderSettings=tenantId=>Object.fromEntries(q('select key,value,encrypted from tenant_provider_settings where tenant_id=?',tenantId).map(row=>[row.key,row.encrypted?decryptSetting(row.value):row.value]));
+const tenantProviderEnv=tenantId=>({
+ ...tenantProviderSettings(tenantId),
+ EGANOW_DEFAULT_COUNTRY_CODE:process.env.EGANOW_DEFAULT_COUNTRY_CODE||'GH0233',
+ EGANOW_DEFAULT_LANGUAGE:process.env.EGANOW_DEFAULT_LANGUAGE||'en',
+ EGANOW_MOMO_PARTNERS:process.env.EGANOW_MOMO_PARTNERS||'MTNGH,ATGH,TCELGH'
+});
+const tenantPaymentProvider=tenantId=>{
+ if(!tenantId||!one('select 1 x from tenants where id=?',tenantId))E(503,'This route has no tenant provider configuration.');
+ const settings=tenantProviderSettings(tenantId);
+ if(process.env.NODE_ENV=='test'){
+  const provider=paymentProviderOverride||paymentProvider;
+  if(typeof provider.getApiUsername=='function'&&(!provider.getApiUsername()||!provider.getApiPassword()))E(503,'Payment provider credentials are not configured for this tenant.');
+  return provider
+ }
+ if(settings.PAYMENT_PROVIDER!='eganow'||!settings.EGANOW_API_USERNAME||!settings.EGANOW_API_PASSWORD)E(503,'Payment provider credentials are not configured for this tenant.');
+ return createPaymentProvider('eganow',{config:tenantProviderEnv(tenantId)});
+};
 const E=(s,m)=>{throw Object.assign(new Error(m),{s})},now=()=>new Date().toISOString().slice(0,16),mins=t=>{const[a,b]=t.split(':');return+a*60+ +b};
 const validDate=d=>typeof d=='string'&&/^\d{4}-\d{2}-\d{2}$/.test(d)&&!Number.isNaN(Date.parse(d+'T00:00:00Z'))&&new Date(d+'T00:00:00Z').toISOString().slice(0,10)==d;
 const validTime=t=>typeof t=='string'&&/^([01]\d|2[0-3]):[0-5]\d$/.test(t);
@@ -37,7 +42,8 @@ const validDateTime=(d,t)=>validDate(d)&&validTime(t);
 const hhmm=m=>{m=Math.min(m,1439);return String(m/60|0).padStart(2,'0')+':'+String(m%60).padStart(2,'0')};
 const stationCode=name=>{const initials=String(name).normalize('NFKD').replace(/[\u0300-\u036f]/g,'').split(/[^A-Za-z0-9]+/).filter(Boolean).map(x=>x[0]).join('').slice(0,4).toUpperCase()||'ST';return initials+'-'+cr.randomBytes(4).toString('hex').toUpperCase()};
 const audit=(u,a,e,id,m)=>{const actor=one('select station_id,tenant_id,organization_id from users where id=?',u)||{},driver=one('select station_id,tenant_id,organization_id from drivers where user_id=?',u)||{},stationId=actor.station_id||driver.station_id||null;run('insert into audit(actor,action,entity,eid,meta,at,station_id,tenant_id,organization_id) values(?,?,?,?,?,?,?,?,?)',u,a,e,id,JSON.stringify(m||{}),new Date().toISOString(),stationId,actor.tenant_id||driver.tenant_id||tenantForStation(stationId),actor.organization_id||driver.organization_id||null)};
-const notify=(u,ev,msg)=>{run('insert into notifications(user_id,event,msg,at) values(?,?,?,?)',u,ev,msg,now());push(u,'notify')};
+const tenantForNotification=userId=>one('select coalesce(u.tenant_id,d.tenant_id) tenant_id from users u left join drivers d on d.user_id=u.id where u.id=?',userId)?.tenant_id||null;
+const notify=(u,ev,msg,tenantId=null)=>{const scope=tenantId||tenantForNotification(u);run('insert into notifications(user_id,event,msg,at,tenant_id) values(?,?,?,?,?)',u,ev,msg,now(),scope);push(u,'notify')};
 const notifyMgrs=(ev,msg,routeId=null,stationId=null)=>{const owner=routeId?one('select tenant_id,origin_id station_id,organization_id from routes where id=?',routeId):stationId?one('select tenant_id,id station_id,null organization_id from stations where id=?',stationId):null,recipients=owner?q("select id from users where role='admin' or role in('manager','accountant') and ((organization_id=? and organization_id is not null) or (tenant_id=? and tenant_id is not null) or station_id=?)",owner.organization_id,owner.tenant_id,owner.station_id):q("select id from users where role='admin'");recipients.forEach(m=>notify(m.id,ev,msg))};
 const setB=(id,st,by,why)=>{const b=one('select status from bookings where id=?',id);run('update bookings set status=? where id=?',st,id);run('insert into history(booking_id,old,new,by,reason,at) values(?,?,?,?,?,?)',id,b.status,st,String(by),why||'',now())};
 const cfg=(k,rid,def)=>{const r=one('select r.origin_id,s.tenant_id,r.organization_id from routes r join stations s on s.id=r.origin_id where r.id=?',rid)||{},tenantFee=['station_fee_pct','platform_fee_pct','driver_station_fee_pct','driver_platform_fee_pct'].includes(k),organizationFee=['loading_fee_pct','driver_loading_fee_pct'].includes(k),scopes=['route:'+rid,...(r.tenant_id&&tenantFee?['tenant:'+r.tenant_id,'station:'+r.origin_id]:[]),...(r.organization_id&&organizationFee?['organization:'+r.organization_id]:[]),...(!tenantFee&&!organizationFee?[r.tenant_id?'tenant:'+r.tenant_id:null,'station:'+r.origin_id,r.organization_id?'organization:'+r.organization_id:null].filter(Boolean):[]),'global'];for(const s of scopes){const c=one('select value from config where scope=? and key=?',s,k);if(c){const n=Number(c.value);return c.value.trim()!==''&&Number.isFinite(n)?n:c.value}}return def};
@@ -66,10 +72,6 @@ function snapshotBookingFees(booking,route,entryType='charge'){
 }
 function reverseBookingFees(booking){q(`select organization_id,origin_tenant_id,fee_kind,stream,payer_type,payer_id,recipient_type,recipient_id,payer_percentage,sum(amount_pesewas) amount
  from booking_fee_allocations where booking_id=? group by organization_id,origin_tenant_id,fee_kind,stream,payer_type,payer_id,recipient_type,recipient_id,payer_percentage having amount<>0`,booking.id).forEach(row=>run('insert into booking_fee_allocations(booking_id,organization_id,origin_tenant_id,fee_kind,stream,payer_type,payer_id,recipient_type,recipient_id,amount_pesewas,payer_percentage,entry_type,created_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',booking.id,row.organization_id,row.origin_tenant_id,row.fee_kind,row.stream,row.payer_type,row.payer_id,row.recipient_type,row.recipient_id,-row.amount,row.payer_percentage,'reversal',now()))}
-// seed
-if(!one('select 1 x from stations')){const stationIds=['East Legon','Oyarifa','Oyibi','Dodowa'].map(name=>{const tenantId=one('select id from tenants where name=?',name)?.id||run('insert into tenants(name) values(?)',name).lastInsertRowid,stationId=run('insert into stations(name,tenant_id,code) values(?,?,?)',name,tenantId,stationCode(name)).lastInsertRowid;run('update tenants set hub_station_id=coalesce(hub_station_id,?) where id=?',stationId,tenantId);const organizationId=run('insert into organizations(name) values(?)',name+' Operators').lastInsertRowid;run('insert into org_tenants(organization_id,tenant_id) values(?,?)',organizationId,tenantId);return{stationId,organizationId}});
- for(const a of stationIds)for(const b of stationIds)if(a.stationId!=b.stationId)run('insert into routes(tenant_id,organization_id,origin_id,dest_id,name) values(?,?,?,?,?)',one('select tenant_id from stations where id=?',a.stationId).tenant_id,a.organizationId,a.stationId,b.stationId,q('select name from stations where id in(?,?)',a.stationId,b.stationId).map(x=>x.name).join(' -> '));
-}
 const hashPin=p=>{const s=cr.randomBytes(8).toString('hex');return s+':'+cr.scryptSync(String(p),s,32).toString('hex')};
 const okPin=(p,h)=>{if(!h||!p)return false;const[s,x]=h.split(':');return cr.timingSafeEqual(Buffer.from(x,'hex'),cr.scryptSync(String(p),s,32))};
 if(!one("select 1 x from users where role='admin'")){
@@ -195,21 +197,27 @@ const chkDrv=(u,did)=>{if(STATION_STAFF.includes(u.role)){const d=one('select st
 const chkPassenger=(u,pid)=>{if(STATION_STAFF.includes(u.role)){const ids=scope(u);if(!ids.length||!one(`select 1 x from bookings where passenger_id=? and route_id in(${ids.join(',')})`,pid))E(403,'Passenger has no booking in your station scope')}};
 const lim=new Map(),limit=(k,max,ms)=>{const n=Date.now(),a=(lim.get(k)||[]).filter(t=>n-t<ms);if(a.length>=max)E(429,'Too many attempts, please try later');a.push(n);lim.set(k,a)};
 setInterval(()=>{const n=Date.now();for(const[k,a]of lim)if(!a.some(t=>n-t<36e5))lim.delete(k)},6e5).unref();
-const sha=x=>cr.createHash('sha256').update(SECRET+x).digest('hex'),STAFF=['manager','accountant','porter','admin'],DEV=!PROD&&gw.provider=='console';
+const sha=x=>cr.createHash('sha256').update(SECRET+x).digest('hex'),STAFF=['manager','accountant','porter','admin'];
 const normalizePhone=(value)=>{const raw=String(value==null?'':value).trim();if(!raw||/[A-Za-z@]/.test(raw))return'';const cleaned=raw.replace(/[^\d+]/g,'').replace(/^\+{2,}/,'+');if(!/^\+?\d+$/.test(cleaned))return'';const digits=cleaned.replace(/\+/g,'');if(digits.length<9||digits.length>15)return'';return cleaned.startsWith('+')?`+${digits}`:digits;};
 const conns=new Map(),tix=new Map();
 function push(uid,ev){for(const c of conns.get(uid)||[])c.res.write(`event: ${ev}\ndata: 1\n\n`)}
 function pushStaff(){for(const s of conns.values())for(const c of s)if(STAFF.includes(c.role))c.res.write('event: refresh\ndata: 1\n\n')}
 api.use((req,res,n)=>{try{limit('api:'+req.ip,+process.env.API_PER_MIN||600,6e4)}catch(e){return res.status(429).json({error:e.message})}if(req.method!='GET')res.on('finish',()=>{if(res.statusCode<300)pushStaff()});n()});
 api.post('/auth/request-otp',H(async req=>{const phone=normalizePhone(req.body.phone),name=String(req.body.name||'').trim(),role=req.body.role; if(!phone)E(400,'Invalid phone number');limit('ip:'+req.ip,20,36e5);limit('ph:'+phone,3,6e5);
- let user=one('select id from users where phone=?',phone),purpose=req.body.purpose|| (user?'verify':'register');
+ let user=one('select id,tenant_id from users where phone=?',phone),purpose=req.body.purpose|| (user?'verify':'register');
  if(!['register','verify','reset-pin'].includes(purpose))E(400,'Invalid OTP purpose');
  if(purpose=='reset-pin'&&!user)return{ok:1};
  if(purpose=='register'&&user)E(409,'Account already exists. Sign in or use PIN recovery.');
- if(!user){if(purpose!='register'||!name||!['passenger','driver'].includes(role))E(400,'name and role (passenger|driver) required');if(!req.body.consent)E(400,'You must accept the Terms and Privacy Notice');run('insert into users(phone,name,role,consent_at,consent_ver) values(?,?,?,?,?)',phone,name,role,new Date().toISOString(),TV)}
+ let tenantId=Number(req.body.tenantId)||user?.tenant_id||null;
+ if(purpose=='register'&&role=='driver')tenantId=tenantForStation(Number(req.body.stationId))||tenantId;
+ if(!tenantId||!one('select 1 x from tenants where id=?',tenantId))E(400,'Choose a tenant with messaging configured before requesting a code');
+ if(user?.tenant_id&&user.tenant_id!=tenantId)E(403,'This account belongs to another tenant');
+ const messaging=tenantProviderSettings(tenantId);if(!messaging.SMS_PROVIDER)E(503,'SMS is not configured for this tenant.');
+ if(!user){if(purpose!='register'||!name||!['passenger','driver'].includes(role))E(400,'name and role (passenger|driver) required');if(!req.body.consent)E(400,'You must accept the Terms and Privacy Notice');run('insert into users(phone,name,role,consent_at,consent_ver,tenant_id) values(?,?,?,?,?,?)',phone,name,role,new Date().toISOString(),TV,tenantId)}
+ else if(!user.tenant_id)run('update users set tenant_id=? where id=?',tenantId,user.id);
  const code=String(100000+cr.randomInt(900000));run('delete from otps where phone=?',phone);run('insert into otps(phone,code,exp,purpose) values(?,?,?,?)',phone,sha(phone+code),Date.now()+3e5,purpose);
- const msg=`Your transport code is ${code}. Valid 5 minutes. Do not share it.`;try{await gw.sms(phone,msg)}catch(e){try{await gw.sms(phone,msg)}catch(e2){console.error('OTP send failed',e2.message);alertOps('otp','OTP SMS failing: '+e2.message);E(502,'Could not send SMS, try again')}}
- return DEV?{ok:1,devOtp:code}:{ok:1}}));
+ const msg=`Your transport code is ${code}. Valid 5 minutes. Do not share it.`;try{await gw.sms(phone,msg,{config:messaging,tenantId})}catch(e){try{await gw.sms(phone,msg,{config:messaging,tenantId})}catch(e2){console.error('OTP send failed',e2.message);alertOps('otp','OTP SMS failing: '+e2.message);E(502,'Could not send SMS, try again')}}
+ return{ok:1}}));
 api.post('/auth/login',H(req=>{const phone=normalizePhone(req.body.phone),pin=String(req.body.pin||''),portal=String(req.body.portal||'');limit('login:'+req.ip,30,36e5);if(!phone||!pin)E(401,'Invalid phone or PIN');const u=one('select * from users where phone=?',phone);if(!u||!u.pin_hash)E(401,'Invalid phone or PIN');if(u.locked_until>Date.now())E(423,'Account locked, try again later');if(!okPin(pin,u.pin_hash)){run('update users set pin_fails=pin_fails+1,locked_until=case when pin_fails+1>=5 then ? else 0 end where id=?',Date.now()+9e5,u.id);audit(u.id,'auth.fail','user',u.id);E(401,'Invalid phone or PIN')}
  if(portal&&!(portal=='manager'?['manager','accountant'].includes(u.role):u.role==portal))E(403,'This account belongs to a different portal');
  run('update users set pin_fails=0,locked_until=0,verified=1 where id=?',u.id);const t=cr.randomBytes(32).toString('hex'),ttl=(STAFF.includes(u.role)?+process.env.STAFF_TTL_H||12:+process.env.TOKEN_TTL_H||168)*36e5;run('insert into sessions(hash,user_id,expires,created,ua) values(?,?,?,?,?)',sha(t),u.id,Date.now()+ttl,Date.now(),(req.get('user-agent')||'').slice(0,100));audit(u.id,'auth.login','user',u.id);return{token:t,expiresAt:Date.now()+ttl,user:{id:u.id,phone:u.phone,name:u.name,role:u.role,station_id:u.station_id,tenant_id:u.tenant_id}}}));
@@ -230,7 +238,7 @@ api.post('/auth/verify-otp',H(req=>{const phone=normalizePhone(req.body.phone),c
  const t=cr.randomBytes(32).toString('hex'),ttl=(STAFF.includes(u.role)?+process.env.STAFF_TTL_H||12:+process.env.TOKEN_TTL_H||168)*36e5;
  run('insert into sessions(hash,user_id,expires,created,ua) values(?,?,?,?,?)',sha(t),u.id,Date.now()+ttl,Date.now(),(req.get('user-agent')||'').slice(0,100));audit(u.id,'auth.login','user',u.id);
  return{token:t,expiresAt:Date.now()+ttl,user:{id:u.id,phone:u.phone,name:u.name,role:u.role,station_id:u.station_id,tenant_id:u.tenant_id}}}));
-api.get('/registration-options',H(()=>({stations:q('select s.id,s.name,s.code,s.tenant_id from stations s order by s.name'),organizations:q('select o.id,o.name,ot.tenant_id from organizations o join org_tenants ot on ot.organization_id=o.id order by o.name'),payPartners:(process.env.EGANOW_MOMO_PARTNERS||'MTNGH,ATGH,TCELGH').split(',').map(x=>x.trim()).filter(Boolean)})));
+api.get('/registration-options',H(()=>({stations:q('select s.id,s.name,s.code,s.tenant_id from stations s order by s.name'),tenants:q('select id,name from tenants order by name'),organizations:q('select o.id,o.name,ot.tenant_id from organizations o join org_tenants ot on ot.organization_id=o.id order by o.name'),payPartners:(process.env.EGANOW_MOMO_PARTNERS||'MTNGH,ATGH,TCELGH').split(',').map(x=>x.trim()).filter(Boolean)})));
 api.use((req,res,n)=>{const t=(req.headers.authorization||'').slice(7),s=t&&one('select * from sessions where hash=? and revoked=0 and expires>?',sha(t),Date.now()),u=s&&one('select * from users where id=?',s.user_id);if(!u)return res.status(401).json({error:'Unauthorised'});req.u=u;req.sh=sha(t);n()});
 api.post('/auth/logout',H(req=>{run('update sessions set revoked=1 where hash=?',req.sh);return{ok:1}}));
 api.post('/auth/logout-all',H(req=>{run('update sessions set revoked=1 where user_id=?',req.u.id);return{ok:1}}));
@@ -241,14 +249,17 @@ let sending=false;
 async function outbox(){if(sending)return;sending=true;try{
  for(const n of q("select n.*,u.phone,u.whatsapp_optin from notifications n join users u on u.id=n.user_id where n.status in('Pending','Retrying') and n.next_try<=? order by n.id limit 20",Date.now())){
   if(!OUTBOX_EVENTS.includes(n.event)){run("update notifications set status='InApp' where id=?",n.id);continue}
+  if(!n.tenant_id){run("update notifications set status='InApp',error='tenant scope unavailable' where id=?",n.id);continue}
+  const messaging=tenantProviderSettings(n.tenant_id);if(!messaging.SMS_PROVIDER){run("update notifications set status='InApp',error='tenant SMS provider not configured' where id=?",n.id);continue}
   try{limit('sms:'+n.user_id,+process.env.SMS_PER_HOUR||10,36e5)}catch(e){run("update notifications set status='Throttled',error='rate limit' where id=?",n.id);continue}
-  try{const ch=gw.waEnabled&&n.whatsapp_optin?'whatsapp':'sms',r=await gw.sms(n.phone,`${n.event}: ${n.msg}`.slice(0,300),{channel:ch,event:n.event,text:n.msg.slice(0,250)});smsFails=0;run("update notifications set status='Sent',channel=?,provider_id=?,attempts=attempts+1 where id=?",r&&r.channel||ch,r&&r.id||null,n.id)}
+  try{const ch=messaging.TWILIO_FROM_WA&&n.whatsapp_optin?'whatsapp':'sms',r=await gw.sms(n.phone,`${n.event}: ${n.msg}`.slice(0,300),{channel:ch,event:n.event,text:n.msg.slice(0,250),config:messaging,tenantId:n.tenant_id});smsFails=0;run("update notifications set status='Sent',channel=?,provider_id=?,attempts=attempts+1 where id=?",r&&r.channel||ch,r&&r.id||null,n.id)}
   catch(e){if(++smsFails>=5)alertOps('sms','Messaging provider failing: '+String(e.message).slice(0,120));const a=n.attempts+1;run('update notifications set status=?,attempts=?,next_try=?,error=? where id=?',a>=5?'Failed':'Retrying',a,Date.now()+Math.min(36e5,3e4*2**a),String(e.message).slice(0,200),n.id)}}}finally{sending=false}}
-api.get('/me',H(r=>({...r.u,token:undefined,pin_hash:undefined,pin_fails:undefined,locked_until:undefined,termsVersion:TV,waEnabled:gw.waEnabled,driver:one('select * from drivers where user_id=?',r.u.id)})));
-api.get('/routes',H(req=>{const routes=STATION_STAFF.includes(req.u.role)?scope(req.u):req.u.role=='driver'&&req.u.organization_id?q('select id from routes where organization_id=?',req.u.organization_id).map(r=>r.id):req.u.role=='driver'&&req.u.tenant_id?q('select id from routes where tenant_id=?',req.u.tenant_id).map(r=>r.id):q('select id from routes').map(r=>r.id);return q('select r.id,r.origin_id,r.dest_id,r.name,o.name organization from routes r left join organizations o on o.id=r.organization_id').filter(r=>routes.includes(r.id)).map(r=>({...r,cutoff_min:cfg('cutoff_min',r.id,CUTOFF),cash_enabled:cfg('cash_enabled',r.id,0)==1}))}));
+api.get('/me',H(r=>({...r.u,token:undefined,pin_hash:undefined,pin_fails:undefined,locked_until:undefined,termsVersion:TV,waEnabled:!!tenantProviderSettings(r.u.tenant_id||tenantForStation(r.u.station_id)||0).TWILIO_FROM_WA,driver:one('select * from drivers where user_id=?',r.u.id)})));
+api.get('/routes',H(req=>{const routes=STATION_STAFF.includes(req.u.role)?scope(req.u):req.u.role=='driver'&&req.u.organization_id?q('select id from routes where organization_id=?',req.u.organization_id).map(r=>r.id):req.u.role=='driver'&&req.u.tenant_id?q('select id from routes where tenant_id=?',req.u.tenant_id).map(r=>r.id):req.u.role=='passenger'?q('select id from routes where tenant_id=?',req.u.tenant_id||0).map(r=>r.id):q('select id from routes').map(r=>r.id);return q('select r.id,r.origin_id,r.dest_id,r.name,o.name organization from routes r left join organizations o on o.id=r.organization_id').filter(r=>routes.includes(r.id)).map(r=>({...r,cutoff_min:cfg('cutoff_min',r.id,CUTOFF),cash_enabled:cfg('cash_enabled',r.id,0)==1}))}));
 api.get('/rides/availability',ROLE('passenger'),H(req=>{
  const routeId=+req.query.routeId,date=String(req.query.date||''),arrival=String(req.query.arrival||''),seats=Number(req.query.seats||1);
  if(!one('select 1 x from routes where id=?',routeId))E(400,'Unknown route');
+ requirePassengerTenant(req.u,routeId);
  if(!validDate(date)||!Number.isSafeInteger(seats)||seats<1||seats>60)E(400,'A valid travel date and passenger count (1-60) are required');
  if(arrival&&!/^([01]\d|2[0-3]):[0-5]\d$/.test(arrival))E(400,'Arrival time must use HH:MM');
  return q("select t.id,t.dep_at,t.status,v.capacity from trips t join vehicles v on v.id=t.vehicle_id where t.route_id=? and substr(t.dep_at,1,10)=? and t.status in('Planned','Loading','Delayed') and t.exclusive_for is null order by t.dep_at,t.id",routeId,date)
@@ -258,13 +269,14 @@ api.get('/rides/availability',ROLE('passenger'),H(req=>{
 }));
 api.get('/notifications',H(r=>q('select * from notifications where user_id=? order by id desc limit 30',r.u.id)));
 const P=ROLE('passenger');
+const requirePassengerTenant=(user,routeId)=>{const route=one('select tenant_id from routes where id=?',routeId);if(!user.tenant_id||!route||route.tenant_id!=user.tenant_id)E(403,'This route is outside your tenant scope')};
 function bookingPublic(id){const b=one(`select b.id,b.ref,b.date,b.arrival,b.seats,b.status,b.payment_status,b.payment_method,
  r.name route,a.seat_label,a.trip_id,t.dep_at,t.status trip_status,v.reg,a.onboard_confirmed,b.fare_pesewas,b.station_fee_pesewas,b.platform_fee_pesewas,b.loading_fee_pesewas,b.paid_pesewas,
  (select count(*) from bookings x where x.status='Queued' and x.payment_status in${DISPATCHABLE_SQL} and x.route_id=b.route_id and x.date=b.date and x.id<b.id)+1 queue_pos
  from bookings b join routes r on r.id=b.route_id left join assignments a on a.booking_id=b.id and a.status in${ACTIVE}
  left join trips t on t.id=a.trip_id left join vehicles v on v.id=t.vehicle_id where b.id=?`,id);
  if(!b)return b;const total=bookingTotal(b);return{id:b.id,ref:b.ref,date:b.date,arrival:b.arrival,seats:b.seats,status:b.status,payment_status:b.payment_status,payment_method:b.payment_method,route:b.route,seat_label:b.seat_label,trip_id:b.trip_id,dep_at:b.dep_at,trip_status:b.trip_status,reg:b.reg,onboard_confirmed:b.onboard_confirmed,queue_pos:b.queue_pos,total_due:'GHS '+ghs(total),amount_due:'GHS '+ghs(Math.max(0,total-b.paid_pesewas)),info:stText(b),payment_attempt_status:(one('select status from booking_payments where booking_id=? order by id desc limit 1',b.id)||{}).status||null}}
-api.get('/quote',P,H(req=>{const routeId=+req.query.routeId,seats=Number(req.query.seats||1);if(!Number.isInteger(routeId)||!one('select 1 x from routes where id=?',routeId))E(400,'Unknown route');if(!Number.isSafeInteger(seats)||seats<1||seats>3)E(400,'Seats must be between 1 and 3');
+api.get('/quote',P,H(req=>{const routeId=+req.query.routeId,seats=Number(req.query.seats||1);if(!Number.isInteger(routeId)||!one('select 1 x from routes where id=?',routeId))E(400,'Unknown route');requirePassengerTenant(req.u,routeId);if(!Number.isSafeInteger(seats)||seats<1||seats>3)E(400,'Seats must be between 1 and 3');
  const fare=routeFare(routeId).farePesewas*seats,charges=riderCharges(fare,cfg('station_fee_pct',routeId,0),cfg('platform_fee_pct',routeId,0)),loading=percentageCharge(fare,cfg('loading_fee_pct',routeId,0));return{total_due:'GHS '+ghs(fare+charges.stationFeePesewas+charges.platformFeePesewas+loading)}}));
 api.get('/me/activity-summary',P,H(req=>{
  const now=new Date(),weekStart=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate()-(now.getUTCDay()+6)%7)),nextWeek=new Date(weekStart.getTime()+7*864e5),
@@ -284,7 +296,7 @@ api.get('/me/activity-summary',P,H(req=>{
   weeklyPlans=one("select count(*) n from recurring where passenger_id=? and status='Active'",uid).n;
  return{...rides,totalGroupRequests:groups.total,weekRequests:groups.weekRequests,monthRequests:groups.monthRequests,pendingGroupRequests:groups.pending,activeWeeklyPlans:weeklyPlans,inProgress:rides.activeRides+groups.pending};
 }));
-function newBooking(u,b,src,rec){const{routeId,date,arrival,seats}=b,paymentMethod=src=='OneTime'?(b.paymentMethod||'digital'):'digital';if(u.noshow_blocked_until>Date.now())E(403,'Bookings suspended until '+new Date(u.noshow_blocked_until).toISOString().slice(0,10)+' because of repeated no-shows');if(!one('select 1 x from routes where id=?',routeId))E(400,'Unknown route');
+function newBooking(u,b,src,rec){const{routeId,date,arrival,seats}=b,paymentMethod=src=='OneTime'?(b.paymentMethod||'digital'):'digital';if(u.noshow_blocked_until>Date.now())E(403,'Bookings suspended until '+new Date(u.noshow_blocked_until).toISOString().slice(0,10)+' because of repeated no-shows');if(!one('select 1 x from routes where id=?',routeId))E(400,'Unknown route');requirePassengerTenant(u,routeId);
  if(!(seats>=1&&seats<=3))E(400,'Ordinary bookings allow 1-3 seats; use a full-vehicle request for more');
  if(!validDateTime(date,arrival))E(400,'Bad date/time');
  if(Date.parse(date+'T'+arrival+':00Z')-Date.now()<cfg('cutoff_min',routeId,CUTOFF)*6e4)E(400,'Booking cut-off has passed for this route');
@@ -300,13 +312,13 @@ api.post('/bookings/:id/cancel',P,H(req=>{const b=one('select * from bookings wh
  if(req.u.role=='passenger'&&b.payment_status=='Credit')E(409,'This booking carries prepaid fare credit. Contact the station manager before cancelling.');
  if(['Boarded','Completed','Cancelled'].includes(b.status))E(409,'Cannot cancel at this stage');if(req.u.role=='passenger'&&new Date(b.date+'T'+b.arrival)-Date.now()<cfg('cancel_deadline_min',b.route_id,0)*6e4)E(409,'Cancellation deadline has passed');run("update assignments set status='Cancelled' where booking_id=? and status in"+ACTIVE,b.id);setB(b.id,'Cancelled',req.u.id,req.body.reason||'cancelled');
  audit(req.u.id,'booking.cancel','booking',b.id);notify(b.passenger_id,'Booking cancelled',`Booking ${b.ref} cancelled.`);return{ok:1}}));
-api.post('/exclusive-requests',P,H(req=>{const routeId=+req.body.routeId,{date,time,vtype}=req.body,seats=Number(req.body.seats);if(!one('select 1 x from routes where id=?',routeId))E(400,'Unknown route');if(!validDateTime(date,time))E(400,'Bad date/time');if(!Number.isSafeInteger(seats)||seats<1)E(400,'Passenger count must be a positive whole number');return{id:run('insert into excl(passenger_id,route_id,date,time,vtype,seats) values(?,?,?,?,?,?)',req.u.id,routeId,date,time,vtype||'any',seats).lastInsertRowid,status:'Pending'}}));
+api.post('/exclusive-requests',P,H(req=>{const routeId=+req.body.routeId,{date,time,vtype}=req.body,seats=Number(req.body.seats);if(!one('select 1 x from routes where id=?',routeId))E(400,'Unknown route');requirePassengerTenant(req.u,routeId);if(!validDateTime(date,time))E(400,'Bad date/time');if(!Number.isSafeInteger(seats)||seats<1)E(400,'Passenger count must be a positive whole number');return{id:run('insert into excl(passenger_id,route_id,date,time,vtype,seats) values(?,?,?,?,?,?)',req.u.id,routeId,date,time,vtype||'any',seats).lastInsertRowid,status:'Pending'}}));
 api.get('/exclusive-requests',P,H(req=>q('select x.*,r.name route from excl x join routes r on r.id=x.route_id where x.passenger_id=? order by x.id desc',req.u.id)));
 api.get('/manager/exclusive',mgr,H(req=>q('select * from excl order by id desc').filter(x=>scope(req.u).includes(x.route_id))));
 ['approve','reject'].forEach(a=>api.post('/manager/exclusive/:id/'+a,mgr,H(req=>{const x=one('select * from excl where id=?',req.params.id);if(!x||x.status!='Pending')E(409,'Not pending');inScope(req.u,x.route_id);
  const tid=a=='approve'?reserveExcl(x,req.body):null;run('update excl set status=?,manager_id=?,trip_id=? where id=?',a=='approve'?'Approved':'Rejected',req.u.id,tid,x.id);notify(x.passenger_id,'Full-vehicle request',`Your request #${x.id} was ${a}d.`);audit(req.u.id,'excl.'+a,'excl',x.id);return{ok:1}})));
 // recurring
-api.post('/recurring',P,H(req=>{const{routeId,days,arrival,seats,startDate,endDate}=req.body;if(!Array.isArray(days)||!days.length||days.some(d=>!Number.isInteger(d)||d<0||d>6)||!(seats>=1&&seats<=3)||!validTime(arrival)||!validDate(startDate)||!validDate(endDate)||endDate<startDate||!one('select 1 x from routes where id=?',routeId))E(400,'Valid route, days[], arrival, seats(1-3), startDate and endDate are required');
+api.post('/recurring',P,H(req=>{const{routeId,days,arrival,seats,startDate,endDate}=req.body;if(!Array.isArray(days)||!days.length||days.some(d=>!Number.isInteger(d)||d<0||d>6)||!(seats>=1&&seats<=3)||!validTime(arrival)||!validDate(startDate)||!validDate(endDate)||endDate<startDate||!one('select 1 x from routes where id=?',routeId))E(400,'Valid route, days[], arrival, seats(1-3), startDate and endDate are required');requirePassengerTenant(req.u,routeId);
  return{id:run('insert into recurring(passenger_id,route_id,seats,arrival,days,start_date,end_date) values(?,?,?,?,?,?,?)',req.u.id,routeId,seats,arrival,days.join(','),startDate,endDate).lastInsertRowid}}));
 api.get('/recurring',P,H(req=>q('select r.*,x.name route from recurring r join routes x on x.id=r.route_id where passenger_id=?',req.u.id)));
 const rec=req=>one('select * from recurring where id=? and passenger_id=?',req.params.id,req.u.id)||E(404,'Not found');
@@ -383,7 +395,7 @@ api.get('/manager/audit',mgr,H(req=>{const staff=STATION_STAFF.includes(req.u.ro
  const W=w.length?' where '+w.join(' and '):'';req.res.set('X-Total-Count',one('select count(*) n from audit'+W,...a).n);return rep(req,q('select id,at,actor,(select name from users where id=actor) actor_name,action,entity,eid,meta from audit'+W+' order by id desc limit ? offset ?',...a,l,o))}));
 // admin
 const AD=ROLE('admin');
-const userTenantScope=(role,b)=>{let stationId=null,tenantId=null,organizationId=null;if(['manager','accountant'].includes(role)){stationId=Number(b.stationId)||null;tenantId=Number(b.tenantId)||null;organizationId=Number(b.organizationId)||null;if(organizationId&&!one('select 1 x from organizations where id=?',organizationId))E(400,'Choose a valid organization');if(tenantId&&!one('select 1 x from tenants where id=?',tenantId))E(400,'Choose a valid tenant');if(stationId&&!tenantForStation(stationId))E(400,'Choose a valid terminal');if(stationId&&tenantId&&tenantForStation(stationId)!=tenantId)E(400,'Terminal must belong to the selected tenant');if([tenantId,organizationId].filter(Boolean).length>1||organizationId&&stationId||tenantId&&stationId)E(400,'Choose one manager scope: organization or tenant');if(!tenantId&&!organizationId&&!stationId)E(400,'Choose an organization or tenant scope for this role')}else if(['porter','driver'].includes(role)&&b.stationId){stationId=Number(b.stationId);tenantId=tenantForStation(stationId);organizationId=role=='driver'?Number(b.organizationId)||null:null;if(!tenantId)E(400,'Choose a valid terminal');if(organizationId&&!one('select 1 x from org_tenants where organization_id=? and tenant_id=?',organizationId,tenantId))E(400,'Choose an organization connected to this terminal')}else if(role=='porter')E(400,'A valid terminal is required for this role');return{stationId,tenantId,organizationId}};
+const userTenantScope=(role,b)=>{let stationId=null,tenantId=null,organizationId=null;if(role=='passenger'){tenantId=Number(b.tenantId)||null;if(!tenantId||!one('select 1 x from tenants where id=?',tenantId))E(400,'Choose a valid tenant for this passenger')}else if(['manager','accountant'].includes(role)){stationId=Number(b.stationId)||null;tenantId=Number(b.tenantId)||null;organizationId=Number(b.organizationId)||null;if(organizationId&&!one('select 1 x from organizations where id=?',organizationId))E(400,'Choose a valid organization');if(tenantId&&!one('select 1 x from tenants where id=?',tenantId))E(400,'Choose a valid tenant');if(stationId&&!tenantForStation(stationId))E(400,'Choose a valid terminal');if(stationId&&tenantId&&tenantForStation(stationId)!=tenantId)E(400,'Terminal must belong to the selected tenant');if([tenantId,organizationId].filter(Boolean).length>1||organizationId&&stationId||tenantId&&stationId)E(400,'Choose one manager scope: organization or tenant');if(!tenantId&&!organizationId&&!stationId)E(400,'Choose an organization or tenant scope for this role')}else if(['porter','driver'].includes(role)&&b.stationId){stationId=Number(b.stationId);tenantId=tenantForStation(stationId);organizationId=role=='driver'?Number(b.organizationId)||null:null;if(!tenantId)E(400,'Choose a valid terminal');if(organizationId&&!one('select 1 x from org_tenants where organization_id=? and tenant_id=?',organizationId,tenantId))E(400,'Choose an organization connected to this terminal')}else if(role=='porter')E(400,'A valid terminal is required for this role');return{stationId,tenantId,organizationId}};
 const createStation=(name,tenantId)=>{for(let attempt=0;attempt<5;attempt++){try{return run('insert into stations(name,tenant_id,code) values(?,?,?)',name,tenantId,stationCode(name)).lastInsertRowid}catch(e){if(!String(e.message).includes('stations.code'))throw e}}E(409,'Could not generate a unique station code; try again')};
 const createOrganizationRoute=(organizationId,originId,destId,fareGhs)=>{const org=one('select id from organizations where id=?',organizationId),origin=one('select id,name,tenant_id from stations where id=?',originId),dest=one('select id,name from stations where id=?',destId),fare=Number(fareGhs);if(!org||!origin||!dest||originId===destId)E(400,'Choose an organization and two different stations');if(!one('select 1 x from org_tenants where organization_id=? and tenant_id=?',organizationId,origin.tenant_id))E(403,'The organization is not connected to the selected origin tenant');if(!Number.isFinite(fare)||toPesewas(fare)<=0||fare>100000)E(400,'Fare must be positive');if(one('select 1 x from routes where organization_id=? and origin_id=? and dest_id=?',organizationId,originId,destId))E(409,'This organization already has this route');
  const name=`${origin.name} -> ${dest.name}`,id=run('insert into routes(tenant_id,organization_id,origin_id,dest_id,name) values(?,?,?,?,?)',origin.tenant_id,organizationId,originId,destId,name).lastInsertRowid;run('insert into config(scope,key,value) values(?,?,?)','route:'+id,'fare_ghs',fare.toFixed(2));return{id,originId,destId,name,fareGhs:fare}};
@@ -431,45 +443,42 @@ api.get('/admin/fee-shares',AD,H(()=>q('select scope_type,scope_id,fee_kind,stre
 api.put('/admin/fee-shares',AD,H(req=>{const scope=String(req.body.scope||''),m=scope.match(/^(global|tenant|organization)(?::([1-9]\d*))?$/);if(!m||m[1]=='global'&&m[2]||m[1]!='global'&&!m[2])E(400,'Invalid fee-share scope');const type=m[1],id=Number(m[2]||0),kind=String(req.body.feeKind||'');if(type=='tenant'&&!one('select 1 x from tenants where id=?',id)||type=='organization'&&!one('select 1 x from organizations where id=?',id))E(400,'Unknown fee-share scope');if(kind=='platform'&&type!='global'||kind=='station'&&!['global','tenant'].includes(type)||kind=='loading'&&!['global','organization'].includes(type))E(400,'Fee-share scope does not match the fee type');return saveFeeShares(req,type,id,kind,req.body.stream,req.body.shares)}));
 api.get('/manager/fee-shares',mgr,H(req=>{const type=req.u.organization_id?'organization':req.u.tenant_id||req.u.station_id?'tenant':null,id=req.u.organization_id||req.u.tenant_id||tenantForStation(req.u.station_id);if(!type||!id)return[];return q("select scope_type,scope_id,fee_kind,stream,payer_type,percentage from fee_share_config where (scope_type=? and scope_id=?) or (scope_type='global' and scope_id=0) order by scope_type,scope_id,fee_kind,stream,payer_type",type,id)}));
 api.put('/manager/fee-shares',mgr,H(req=>{const kind=String(req.body.feeKind||''),stream=String(req.body.stream||''),expected=req.u.organization_id?['organization',req.u.organization_id]:req.u.tenant_id||req.u.station_id?['tenant',req.u.tenant_id||tenantForStation(req.u.station_id)]:null;if(!expected)E(403,'Manager account has no organization or tenant scope');if(kind!='station'&&kind!='loading'||kind=='station'&&expected[0]!='tenant'||kind=='loading'&&expected[0]!='organization')E(403,'This fee type is outside your configuration scope');return saveFeeShares(req,expected[0],expected[1],kind,stream,req.body.shares)}));
-api.get('/admin/platform-settings',AD,H(()=>({
- settings:Object.fromEntries(PLATFORM_SETTING_KEYS.filter(k=>!PLATFORM_SECRET_KEYS.has(k)).map(k=>[k,process.env[k]||''])),
- secrets:Object.fromEntries([...PLATFORM_SECRET_KEYS].map(k=>[k,!!(process.env[k]||'')]))
-})));
+api.get('/admin/platform-settings',AD,H(req=>{
+ const tenantId=Number(req.query.tenantId)||null,tenants=q('select id,name from tenants order by name');
+ if(tenantId&&!one('select 1 x from tenants where id=?',tenantId))E(404,'Tenant not found');
+ const stored=tenantId?tenantProviderSettings(tenantId):{},settings=Object.fromEntries(TENANT_SETTING_KEYS.filter(k=>!TENANT_SECRET_KEYS.has(k)).map(k=>[k,stored[k]||'']));
+ return{tenants,tenantId,settings,secrets:Object.fromEntries([...TENANT_SECRET_KEYS].map(k=>[k,!!stored[k]])),
+  payloadDefaults:{countryCode:process.env.EGANOW_DEFAULT_COUNTRY_CODE||'GH0233',language:process.env.EGANOW_DEFAULT_LANGUAGE||'en',mobileMoneyPartners:(process.env.EGANOW_MOMO_PARTNERS||'MTNGH,ATGH,TCELGH').split(',').map(x=>x.trim()).filter(Boolean)}}
+}));
 api.put('/admin/platform-settings',AD,H(req=>{
- const settings=req.body.settings||{},clearSecrets=req.body.clearSecrets||[];
- if(!settings||typeof settings!='object'||Array.isArray(settings)||!Array.isArray(clearSecrets))E(400,'Invalid platform settings');
+ const tenantId=Number(req.body.tenantId),settings=req.body.settings||{},clearSecrets=req.body.clearSecrets||[];
+ if(!Number.isSafeInteger(tenantId)||tenantId<1||!one('select 1 x from tenants where id=?',tenantId))E(400,'Choose a valid tenant');
+ if(!settings||typeof settings!='object'||Array.isArray(settings)||!Array.isArray(clearSecrets))E(400,'Invalid tenant provider settings');
  const next={},changed=[];
  for(const[k,raw]of Object.entries(settings)){
-  if(!PLATFORM_SETTING_KEYS.includes(k))E(400,'Unknown platform setting');
+  if(!TENANT_SETTING_KEYS.includes(k))E(400,'Unknown tenant provider setting');
   if(typeof raw!='string'||raw.length>2048)E(400,`${k} must be a text value up to 2048 characters`);
-  if(PLATFORM_SECRET_KEYS.has(k)&&!raw)continue;
+  if(TENANT_SECRET_KEYS.has(k)&&!raw)continue;
   next[k]=raw.trim();changed.push(k)
  }
- if(clearSecrets.some(k=>!PLATFORM_SECRET_KEYS.has(k)))E(400,'Invalid secret field to clear');
- const payment=next.PAYMENT_PROVIDER??process.env.PAYMENT_PROVIDER??'eganow',sms=next.SMS_PROVIDER??process.env.SMS_PROVIDER??(PROD?'twilio':'console'),email=next.EMAIL_PROVIDER??process.env.EMAIL_PROVIDER??'disabled';
- if(!['eganow','mock'].includes(payment)||!['twilio','http','console'].includes(sms)||!['disabled','smtp'].includes(email))E(400,'Unsupported payment, SMS, or email provider');
- if((payment=='mock'||sms=='console')&&process.env.NODE_ENV!='test')E(400,'Mock payments and console messaging are only allowed in tests');
- const port=Number(next.SMTP_PORT??process.env.SMTP_PORT??'587');if((next.SMTP_PORT??process.env.SMTP_PORT)&&(!Number.isInteger(port)||port<1||port>65535))E(400,'SMTP_PORT must be between 1 and 65535');
+ if(clearSecrets.some(k=>!TENANT_SECRET_KEYS.has(k)))E(400,'Invalid secret field to clear');
+ const existing=tenantProviderSettings(tenantId),value=(key)=>next[key]??existing[key]??'';
+ if(value('PAYMENT_PROVIDER')&&!['eganow'].includes(value('PAYMENT_PROVIDER')))E(400,'Unsupported payment provider');
+ if(value('SMS_PROVIDER')&&!['twilio','http'].includes(value('SMS_PROVIDER')))E(400,'Unsupported SMS provider');
+ if(value('EMAIL_PROVIDER')&&!['disabled','smtp'].includes(value('EMAIL_PROVIDER')))E(400,'Unsupported email provider');
+ const port=Number(value('SMTP_PORT')||'587');if(value('SMTP_PORT')&&(!Number.isInteger(port)||port<1||port>65535))E(400,'SMTP_PORT must be between 1 and 65535');
  for(const key of['EGANOW_BASE_URL','EGANOW_CALLBACK_URL','TWILIO_API_BASE_URL','SMS_URL']){
-  const value=next[key]??process.env[key];if(!value)continue;
-  let url;try{url=new URL(value)}catch{E(400,`${key} must be a valid URL`)}
+  const raw=value(key);if(!raw)continue;
+  let url;try{url=new URL(raw)}catch{E(400,`${key} must be a valid URL`)}
   if(PROD&&url.protocol!='https:')E(400,`${key} must use HTTPS in production`)
  }
- if(settings.NOTIFY_CHANNEL&&!['sms','whatsapp'].includes(settings.NOTIFY_CHANNEL))E(400,'NOTIFY_CHANNEL must be sms or whatsapp');
- if(settings.EMAIL_PROVIDER=='smtp'&&(!settings.SMTP_HOST&&!process.env.SMTP_HOST))E(400,'Configure SMTP_HOST before selecting SMTP');
- const prior={};for(const k of [...changed,...clearSecrets])prior[k]=process.env[k];const priorPaymentProvider=paymentProvider,priorFeeProvider=feeProvider;
- try{
-  for(const[k,value]of Object.entries(next))process.env[k]=value;
-  for(const k of clearSecrets)delete process.env[k];
-  if((next.PAYMENT_PROVIDER||clearSecrets.includes('PAYMENT_PROVIDER'))&&typeof paymentProvider!='undefined'){
-   paymentProvider=createPaymentProvider();feeProvider=createPaymentProvider(paymentProvider.name,{envPrefix:'FEES_EGANOW'})
-  }
-  db.transaction(()=>{
-   for(const[k,value]of Object.entries(next))run('insert into platform_settings(key,value,encrypted) values(?,?,?) on conflict(key) do update set value=excluded.value,encrypted=excluded.encrypted',k,PLATFORM_SECRET_KEYS.has(k)?encryptSetting(value):value,PLATFORM_SECRET_KEYS.has(k)?1:0);
-   for(const k of clearSecrets)run('delete from platform_settings where key=?',k);
-   audit(req.u.id,'platform.settings','platform',0,{settings:changed,clearedSecrets:clearSecrets})
-  })()
- }catch(e){for(const k of [...changed,...clearSecrets]){if(prior[k]===undefined)delete process.env[k];else process.env[k]=prior[k]}paymentProvider=priorPaymentProvider;feeProvider=priorFeeProvider;throw e}
+ if(value('NOTIFY_CHANNEL')&&!['sms','whatsapp'].includes(value('NOTIFY_CHANNEL')))E(400,'NOTIFY_CHANNEL must be sms or whatsapp');
+ if(value('EMAIL_PROVIDER')=='smtp'&&!value('SMTP_HOST'))E(400,'Configure SMTP_HOST before selecting SMTP');
+ db.transaction(()=>{
+  for(const[k,setting]of Object.entries(next))run('insert into tenant_provider_settings(tenant_id,key,value,encrypted) values(?,?,?,?) on conflict(tenant_id,key) do update set value=excluded.value,encrypted=excluded.encrypted',tenantId,k,TENANT_SECRET_KEYS.has(k)?encryptSetting(setting):setting,TENANT_SECRET_KEYS.has(k)?1:0);
+  for(const k of clearSecrets)run('delete from tenant_provider_settings where tenant_id=? and key=?',tenantId,k);
+  audit(req.u.id,'tenant.providers.configure','tenant',tenantId,{settings:changed,clearedSecrets:clearSecrets})
+ })();
  return{ok:1}
 }));
 api.get('/reports/daily-operations',mgr,H(req=>{const ids=scope(req.u).join(',')||0;return rep(req,q(`select substr(t.dep_at,1,10) day,t.status,count(*) trips from trips t join routes r on r.id=t.route_id where r.id in(${ids}) group by 1,2`))}));
@@ -533,7 +542,6 @@ api.put('/config',mgr,H(req=>{const{scope:s,key,value}=req.body,u=req.u;
  const ok=s=='global'?u.role=='admin':k=='station'?numericId&&!!one('select 1 x from stations where id=?',+id)&&(u.role=='admin'||STATION_STAFF.includes(u.role)&&!u.organization_id&&stationInScope(u,+id)):k=='tenant'?numericId&&!!one('select 1 x from tenants where id=?',+id)&&(u.role=='admin'||STATION_STAFF.includes(u.role)&&!u.organization_id&&u.tenant_id==+id):k=='organization'?numericId&&!!one('select 1 x from organizations where id=?',+id)&&(u.role=='admin'||STATION_STAFF.includes(u.role)&&u.organization_id==+id):k=='route'?numericId&&scope(u).includes(+id):false;if(!ok)E(403,'Scope not allowed');
  if(feeKey&&u.role!='admin'&&(tenantFee.includes(key)?(k!='tenant'||u.organization_id):(organizationFee.includes(key)?(k!='organization'||!u.organization_id):true)))E(403,'Fee rate cannot be changed in this scope');
  if(['fee_due_hours','fee_max_outstanding_ghs','fee_manual_needs_approval'].includes(key)&&u.role!='admin')E(403,'This fee policy is admin-only');
- if(key=='cash_enabled'&&Number(value)==1&&PROD)for(const suffix of['BASE_URL','API_USERNAME','API_PASSWORD','X_AUTH'])if(!process.env['FEES_EGANOW_'+suffix])E(400,`FEES_EGANOW_${suffix} must be configured before enabling cash`);
  run('insert into config values(?,?,?) on conflict(scope,key) do update set value=excluded.value',s,key,String(value));audit(u.id,'config.set','config',0,req.body);return{ok:1}}));
 api.patch('/bookings/:id',P,H(req=>db.transaction(()=>{const b=one('select * from bookings where id=? and passenger_id=?',req.params.id,req.u.id);if(!b)E(404,'Not found');if(!['Queued','Assigned','Confirmed'].includes(b.status))E(409,'Cannot edit at this stage');
  if(b.paid_pesewas>0||b.payment_status=='Credit')E(409,'Paid bookings cannot be edited; contact the station manager to request a fare adjustment.');
@@ -638,8 +646,7 @@ api.post('/me/pin',H(req=>{const{oldPin,newPin}=req.body;if(!STAFF.includes(req.
 // ---- v1.5 additions: ops, expiry, consent versions, WhatsApp opt-in ----
 const TV=process.env.TERMS_VERSION||'1';let lastJob=Date.now(),smsFails=0;const alertLast=new Map();
 async function alertOps(key,msg){if(Date.now()-(alertLast.get(key)||0)<(+process.env.ALERT_COOLDOWN_MIN||60)*6e4)return;alertLast.set(key,Date.now());console.error('[ALERT]',msg);
- if(process.env.ALERT_WEBHOOK)await fetch(process.env.ALERT_WEBHOOK,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'Transport: '+msg,content:'Transport: '+msg}),signal:AbortSignal.timeout(8000)}).catch(e=>console.error('alert webhook failed',e.message));
- for(const p of(process.env.ALERT_PHONES||'').split(',').filter(Boolean))await gw.sms(p,'ALERT: '+msg).catch(()=>{})}
+ if(process.env.ALERT_WEBHOOK)await fetch(process.env.ALERT_WEBHOOK,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'Transport: '+msg,content:'Transport: '+msg}),signal:AbortSignal.timeout(8000)}).catch(e=>console.error('alert webhook failed',e.message))}
 function health(){const c={};try{one('select 1 x');c.db='ok'}catch(e){c.db='FAIL: '+e.message}
  const bf=fs.existsSync(BK)?fs.readdirSync(BK).filter(x=>x.endsWith('.db')).sort().pop():null,age=bf?(Date.now()-fs.statSync(path.join(BK,bf)).mtimeMs)/36e5:null;
  c.backup=age==null?'FAIL: no backup yet':age>(+process.env.BACKUP_EVERY_H||6)*2+1?`FAIL: last backup ${age.toFixed(1)}h ago`:`ok (${age.toFixed(1)}h ago)`;
@@ -656,25 +663,19 @@ function expiryCheck(){const today=now().slice(0,10),in30=addDays(today,30),in7=
   else{const lvl=d.expires_on<=in7?2:1;if(d.expiry_level<lvl){run('update docs set expiry_level=? where id=?',lvl,d.id);notify(d.owner_id,'Document expiring',`Your ${d.kind} expires on ${d.expires_on}. Please upload the renewal.`);if(lvl==2)notifyMgrs('Document expiring',`Driver #${d.owner_id}: ${d.kind} expires ${d.expires_on}.`,null,one('select station_id from drivers where user_id=?',d.owner_id)?.station_id)}}}}
 const cfgOk=(u,s)=>{const[k,id]=String(s).split(':'),numericId=/^[1-9]\d*$/.test(id||'');return s=='global'?u.role=='admin':k=='station'?numericId&&!!one('select 1 x from stations where id=?',+id)&&(u.role=='admin'||STATION_STAFF.includes(u.role)&&stationInScope(u,+id)):k=='route'?numericId&&scope(u).includes(+id):false};
 api.delete('/config',mgr,H(req=>{if(FEE_CONFIG_KEYS.includes(req.body.key)&&req.u.role!='admin')E(403,'Fee percentages can only be changed through the admin fees panel');if(!cfgOk(req.u,req.body.scope))E(403,'Scope not allowed');run('delete from config where scope=? and key=?',req.body.scope,req.body.key);audit(req.u.id,'config.remove','config',0,req.body);return{ok:1}}));
-api.post('/me/whatsapp',H(req=>{run('update users set whatsapp_optin=? where id=?',req.body.optin?1:0,req.u.id);audit(req.u.id,'whatsapp.optin','user',req.u.id,req.body);return{ok:1,enabled:gw.waEnabled}}));
+api.post('/me/whatsapp',H(req=>{run('update users set whatsapp_optin=? where id=?',req.body.optin?1:0,req.u.id);audit(req.u.id,'whatsapp.optin','user',req.u.id,req.body);const tenantId=req.u.tenant_id||tenantForStation(req.u.station_id);return{ok:1,enabled:!!tenantProviderSettings(tenantId||0).TWILIO_FROM_WA}}));
 api.post('/me/consent',H(req=>{run('update users set consent_at=?,consent_ver=? where id=?',new Date().toISOString(),TV,req.u.id);return{ok:1}}));
 app.get('/api/v1/events',(req,res)=>{const t=tix.get(req.query.ticket);tix.delete(req.query.ticket);if(!t||t.exp<Date.now())return res.sendStatus(401);
  res.set({'Content-Type':'text/event-stream','Cache-Control':'no-cache','X-Accel-Buffering':'no'});res.flushHeaders();res.write('retry: 5000\n\n');
  const c={res,role:t.role};if(!conns.has(t.id))conns.set(t.id,new Set());conns.get(t.id).add(c);req.on('close',()=>conns.get(t.id)?.delete(c))});
-app.post('/webhooks/sms-status',express.urlencoded({extended:false}),(req,res)=>{if(!process.env.WEBHOOK_KEY||req.query.key!==process.env.WEBHOOK_KEY)return res.sendStatus(403);
+app.post('/webhooks/sms-status',express.urlencoded({extended:false}),(req,res)=>{const tenantId=Number(req.query.tenantId),key=tenantId&&tenantProviderSettings(tenantId).WEBHOOK_KEY;if(!key||req.query.key!==key)return res.sendStatus(403);
  const st={delivered:'Delivered',failed:'Failed',undelivered:'Failed',sent:'Sent'}[req.body.MessageStatus];if(st)run('update notifications set status=? where provider_id=?',st,req.body.MessageSid);res.sendStatus(204)});
-let paymentProvider = createPaymentProvider(),feeProvider=createPaymentProvider(paymentProvider.name,{envPrefix:'FEES_EGANOW'});
-const cashEnabledSomewhere=()=>cfg('cash_enabled',null,0)==1||q('select id from routes').some(r=>cfg('cash_enabled',r.id,0)==1);
-if(PROD&&cashEnabledSomewhere()){
- if(feeProvider.name!='eganow')throw new Error('Cash-enabled production requires the fee Eganow provider');
- for(const key of['BASE_URL','API_USERNAME','API_PASSWORD','X_AUTH'])if(!process.env['FEES_EGANOW_'+key])throw new Error(`FEES_EGANOW_${key} must be configured when cash is enabled`);
- feeProvider.getBaseUrl()
-}
+let paymentProvider = createPaymentProvider('eganow');
 const providerOutcome=result=>{const s=String(result?.transactionstatus||result?.transactionStatus||result?.status||result?.data?.status||'').trim().toUpperCase();
  if(result?.isSuccess===true||['SUCCESS','SUCCESSFUL','COMPLETED'].includes(s))return'Succeeded';
  if(result?.isSuccess===false||['FAILED','FAILURE','CANCELLED','REJECTED'].includes(s))return'Failed';return'Pending'};
 function applyPaymentResult(paymentId,result){
- const p=one('select * from booking_payments where id=?',paymentId);if(!p||p.status!='Pending')return p;
+ const p=one('select * from booking_payments where id=?',paymentId);if(!p||!['Pending','NeedsReview'].includes(p.status))return p;
  const outcome=providerOutcome(result),statusText=String(result?.transactionstatus||result?.transactionStatus||result?.status||result?.data?.status||'').slice(0,40)||null;
  db.transaction(()=>{run('update booking_payments set status=?,response_status=?,updated_at=? where id=?',outcome,statusText,now(),p.id);
   if(outcome=='Succeeded'){const b=one('select * from bookings where id=?',p.booking_id),total=bookingTotal(b),paid=Math.min(total,b.paid_pesewas+p.amount_pesewas),st=paid>=total?'Paid':'Partial';
@@ -687,17 +688,18 @@ api.post('/bookings/:id/pay',P,H(async req=>{
  if(b.payment_status=='Paid')E(409,'Booking is already paid');
  const pending=one("select 1 x from booking_payments where booking_id=? and status in('Pending','NeedsReview')",b.id);if(pending)E(409,'A payment is already pending; check its status before retrying');
  const amount=bookingTotal(b)-b.paid_pesewas;if(amount<=0)E(409,'No balance is due');
- const partner=String(req.body.paypartnerCode||'').trim().toUpperCase();if(!isSupportedPayPartner(paymentProvider,partner))E(400,'Choose a supported mobile-money network');
+ const tenantId=one('select tenant_id from routes where id=?',b.route_id)?.tenant_id,provider=tenantPaymentProvider(tenantId);
+ const partner=String(req.body.paypartnerCode||'').trim().toUpperCase();if(!isSupportedPayPartner(provider,partner))E(400,'Choose a supported mobile-money network');
  const transactionId='TP'+cr.randomBytes(12).toString('hex').toUpperCase(),created=now();
  const paymentId=run("insert into booking_payments(booking_id,transaction_id,amount_pesewas,status,created_at,updated_at) values(?,?,?,'Pending',?,?)",b.id,transactionId,amount,created,created).lastInsertRowid;
- try{const result=await paymentProvider.initiateCollection({amount:ghs(amount),transCurrencyIso:'GHS',transactionId,reference:b.ref,paypartnerCode:partner,accountNoOrCardNoOrMSISDN:normalizeMsisdn(req.u.phone),countryCode:process.env.EGANOW_DEFAULT_COUNTRY_CODE||'GH0233',languageId:process.env.EGANOW_DEFAULT_LANGUAGE||'en',callback:process.env.EGANOW_CALLBACK_URL||''});
+ try{const result=await provider.initiateCollection({amount:ghs(amount),transCurrencyIso:'GHS',transactionId,reference:b.ref,paypartnerCode:partner,accountNoOrCardNoOrMSISDN:normalizeMsisdn(req.u.phone),countryCode:provider.getDefaultCountryCode?.()||'GH0233',languageId:provider.getDefaultLanguage?.()||'en',callback:provider.getCallbackUrl?.()||''});
   const updated=applyPaymentResult(paymentId,result);return{paymentId,transactionId,status:updated.status,amountGhs:ghs(amount),message:updated.status=='Succeeded'?'Payment confirmed':'Approve the payment request, then check status.'}
  }catch(e){run("update booking_payments set status='NeedsReview',response_status='provider error',updated_at=? where id=?",now(),paymentId);notifyMgrs('Payment attention',`Payment for booking ${b.ref} needs provider status review.`,b.route_id);throw e}
 }));
 api.post('/bookings/:id/payment/status',P,H(async req=>{
- const b=one('select id from bookings where id=? and passenger_id=?',req.params.id,req.u.id);if(!b)E(404,'Booking not found');
+ const b=one('select id,route_id from bookings where id=? and passenger_id=?',req.params.id,req.u.id);if(!b)E(404,'Booking not found');
  const p=one('select * from booking_payments where booking_id=? order by id desc limit 1',b.id);if(!p)E(404,'No payment attempt found');
- if(['Pending','NeedsReview'].includes(p.status)){const result=await paymentProvider.getTransactionStatus({transactionId:p.transaction_id});return applyPaymentResult(p.id,result)}
+ if(['Pending','NeedsReview'].includes(p.status)){const tenantId=one('select tenant_id from routes where id=?',b.route_id)?.tenant_id,result=await tenantPaymentProvider(tenantId).getTransactionStatus({transactionId:p.transaction_id});return applyPaymentResult(p.id,result)}
  return p
 }));
 function confirmBoarding(a,uid,reason){if(a.onboard_confirmed)return;db.transaction(()=>{run("update assignments set onboard_confirmed=1,onboard_confirmed_at=?,status='Boarded' where id=?",now(),a.id);setB(a.booking_id,'Boarded',uid,reason);
@@ -735,6 +737,7 @@ async function releaseDriverPayout(bookingId,gate,retryFailed=false){
  if(gate=='manager_completion'&&(configured!='manager_completion'||row.trip_status!='Completed'||!row.settlement_confirmed_by))return null;
  const amount=row.fare_pesewas-payoutDeduction(bookingId);if(amount<=0)return null;
  if(!row.payout_partner||!row.payout_msisdn){notifyMgrs('Payout attention',`Driver for booking ${row.ref} has no verified payout details.`,row.route_id);return null}
+ const provider=tenantPaymentProvider(one('select tenant_id from routes where id=?',row.route_id)?.tenant_id);
  const existing=one('select * from driver_payouts where booking_id=?',bookingId),created=now();
  if(existing){
   if(existing.status!='Failed'||!retryFailed)return existing;
@@ -745,7 +748,7 @@ async function releaseDriverPayout(bookingId,gate,retryFailed=false){
   run("insert into driver_payouts(booking_id,trip_id,transaction_id,amount_pesewas,gate,status,created_at,updated_at) values(?,?,?,?,?,'Pending',?,?)",bookingId,row.trip_id,transactionId,amount,gate,created,created);
  }
  const payout=one('select * from driver_payouts where booking_id=?',bookingId);
- try{const result=await paymentProvider.initiatePayout({amount:ghs(amount),transCurrencyIso:'GHS',transactionId:payout.transaction_id,reference:row.ref,paypartnerCode:row.payout_partner,accountNoOrCardNoOrMSISDN:row.payout_msisdn,countryCode:process.env.EGANOW_DEFAULT_COUNTRY_CODE||'GH0233',languageId:process.env.EGANOW_DEFAULT_LANGUAGE||'en',callback:process.env.EGANOW_CALLBACK_URL||''}),status=providerOutcome(result),responseStatus=String(result?.transactionstatus||result?.transactionStatus||result?.status||result?.data?.status||'').slice(0,40)||null;
+ try{const result=await provider.initiatePayout({amount:ghs(amount),transCurrencyIso:'GHS',transactionId:payout.transaction_id,reference:row.ref,paypartnerCode:row.payout_partner,accountNoOrCardNoOrMSISDN:row.payout_msisdn,countryCode:provider.getDefaultCountryCode?.()||'GH0233',languageId:provider.getDefaultLanguage?.()||'en',callback:provider.getCallbackUrl?.()||''}),status=providerOutcome(result),responseStatus=String(result?.transactionstatus||result?.transactionStatus||result?.status||result?.data?.status||'').slice(0,40)||null;
   db.transaction(()=>{run('update driver_payouts set status=?,response_status=?,updated_at=? where id=?',status,responseStatus,now(),payout.id);if(status=='Succeeded')ledgerDriverDeductions(row)})();
   if(status=='Failed')notifyMgrs('Payout attention',`Payout for booking ${row.ref} failed; review provider status.`,row.route_id);
   else notify(one('select driver_id from trips where id=?',row.trip_id).driver_id,'Payout update',`Payout for booking ${row.ref}: ${status}.`);
@@ -763,7 +766,7 @@ api.post('/manager/trips/:id/settle',mgr,H(async req=>{
 }));
 api.post('/manager/payouts/:id/status',mgr,H(async req=>{
  const p=one('select p.*,t.route_id from driver_payouts p join trips t on t.id=p.trip_id where p.id=?',req.params.id);if(!p)E(404,'Payout not found');inScope(req.u,p.route_id);
- if(!['Pending','NeedsReview'].includes(p.status))return p;const result=await paymentProvider.getTransactionStatus({transactionId:p.transaction_id}),status=providerOutcome(result),responseStatus=String(result?.transactionstatus||result?.transactionStatus||result?.status||result?.data?.status||'').slice(0,40)||null;
+ if(!['Pending','NeedsReview'].includes(p.status))return p;const tenantId=one('select tenant_id from routes where id=?',p.route_id)?.tenant_id,result=await tenantPaymentProvider(tenantId).getTransactionStatus({transactionId:p.transaction_id}),status=providerOutcome(result),responseStatus=String(result?.transactionstatus||result?.transactionStatus||result?.status||result?.data?.status||'').slice(0,40)||null;
  const booking=one('select b.* from bookings b where b.id=?',p.booking_id);
  db.transaction(()=>{run('update driver_payouts set status=?,response_status=?,updated_at=? where id=?',status,responseStatus,now(),p.id);if(status=='Succeeded')ledgerDriverDeductions(booking)})();
  return one('select * from driver_payouts where id=?',p.id)
@@ -832,16 +835,16 @@ api.post('/drivers/me/fees/pay',DR,H(async req=>{
  const amount=toPesewas(raw),outstanding=feeOutstanding(req.u.id);if(amount<=0||amount>outstanding)E(400,'Amount must be positive and no greater than the outstanding balance');
  if(one("select 1 x from fee_collections where driver_id=? and status in('Pending','NeedsReview')",req.u.id))E(409,'A fee collection is already pending; check its status first');
  const d=one('select payout_partner,payout_msisdn,station_id from drivers where user_id=?',req.u.id);if(!d?.payout_partner||!d.payout_msisdn)E(409,'Set verified MoMo payout details before paying fees');
- if(!isSupportedPayPartner(feeProvider,d.payout_partner))E(400,'Saved payout network is not supported by the fee account');
+ const provider=tenantPaymentProvider(tenantForStation(d.station_id));if(!isSupportedPayPartner(provider,d.payout_partner))E(400,'Saved payout network is not supported by the tenant payment provider');
  const transactionId='TF'+cr.randomBytes(12).toString('hex').toUpperCase(),created=now(),id=run("insert into fee_collections(driver_id,transaction_id,amount_pesewas,status,created_at,updated_at) values(?,?,?,'Pending',?,?)",req.u.id,transactionId,amount,created,created).lastInsertRowid;
- try{const result=await feeProvider.initiateCollection({amount:ghs(amount),transCurrencyIso:'GHS',transactionId,reference:transactionId,paypartnerCode:d.payout_partner,accountNoOrCardNoOrMSISDN:d.payout_msisdn,countryCode:feeProvider.getDefaultCountryCode?.()||'GH0233',languageId:feeProvider.getDefaultLanguage?.()||'en',callback:feeProvider.getCallbackUrl?.()||''});
+ try{const result=await provider.initiateCollection({amount:ghs(amount),transCurrencyIso:'GHS',transactionId,reference:transactionId,paypartnerCode:d.payout_partner,accountNoOrCardNoOrMSISDN:d.payout_msisdn,countryCode:provider.getDefaultCountryCode?.()||'GH0233',languageId:provider.getDefaultLanguage?.()||'en',callback:provider.getCallbackUrl?.()||''});
   const updated=applyFeeCollectionResult(id,result);return{transactionId,status:updated.status,amountGhs:ghs(amount),message:updated.status=='Succeeded'?'Fee payment confirmed':'Approve the MoMo request, then check status.'}
  }catch(e){run("update fee_collections set status='NeedsReview',response_status='provider error',updated_at=? where id=?",now(),id);notifyMgrs('Fee due',`Fee collection ${transactionId} needs provider review.`,null,d.station_id);throw e}
 }));
 api.post('/drivers/me/fees/status',DR,H(async req=>{
  const c=req.body.transactionId?one('select * from fee_collections where driver_id=? and transaction_id=?',req.u.id,String(req.body.transactionId)):one("select * from fee_collections where driver_id=? and status in('Pending','NeedsReview') order by id desc limit 1",req.u.id);
  if(!c)E(404,'No pending fee collection found');if(!['Pending','NeedsReview'].includes(c.status))return c;
- const result=await feeProvider.getTransactionStatus({transactionId:c.transaction_id});return applyFeeCollectionResult(c.id,result)
+ const stationId=one('select station_id from drivers where user_id=?',req.u.id)?.station_id,provider=tenantPaymentProvider(tenantForStation(stationId)),result=await provider.getTransactionStatus({transactionId:c.transaction_id});return applyFeeCollectionResult(c.id,result)
 }));
 function inFeeScope(u,stationId){if(u.role=='admin')return;if(!STATION_STAFF.includes(u.role)||!stationInScope(u,stationId))E(403,'Outside your tenant scope')}
 api.get('/manager/fees',mgr,H(req=>{
@@ -878,6 +881,7 @@ const bk=require('./backup'),BK=path.resolve(process.env.BACKUP_DIR||'backups'),
 if(require.main===module){setInterval(()=>{try{jobs();lastJob=Date.now()}catch(e){console.error(e)}},+process.env.JOB_MS||10000);
  setInterval(()=>conns.forEach(s=>s.forEach(c=>c.res.write(': ping\n\n'))),25000).unref();
  const doBackup=()=>backup().then(f=>{console.log('backup',f);if(process.env.BACKUP_PING_URL)fetch(process.env.BACKUP_PING_URL).catch(()=>{})},e=>{console.error('BACKUP FAILED',e);alertOps('backup','BACKUP FAILED: '+e.message)});setInterval(doBackup,(+process.env.BACKUP_EVERY_H||6)*36e5).unref();setTimeout(doBackup,5000).unref();setInterval(retention,864e5).unref();setTimeout(retention,9000).unref();setInterval(expiryCheck,36e5).unref();setTimeout(expiryCheck,12000).unref();setInterval(watchdog,3e5).unref();
- const srv=app.listen(process.env.PORT||3000,()=>console.log('Transport system on :'+(process.env.PORT||3000)+(process.env.NODE_ENV=='test'?' (TEST mode: OTP echoed, console SMS)':PROD?'':' (DEV mode)')));
+ const srv=app.listen(process.env.PORT||3000,()=>console.log('Transport system on :'+(process.env.PORT||3000)));
  for(const s of['SIGTERM','SIGINT'])process.on(s,()=>{srv.close(()=>{db.close();process.exit(0)});setTimeout(()=>process.exit(1),8000).unref()})}
-module.exports={app,jobs,db,backup,outbox,reminders,retention,noshowRule,expiryCheck,alertOps,health};
+const paymentTesting=process.env.NODE_ENV=='test'?{setProviderForTests(provider){const previous=paymentProviderOverride;paymentProviderOverride=provider;return()=>{paymentProviderOverride=previous}}}:{};
+module.exports={app,jobs,db,backup,outbox,reminders,retention,noshowRule,expiryCheck,alertOps,health,...paymentTesting};

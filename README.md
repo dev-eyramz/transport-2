@@ -1,10 +1,10 @@
 # Community Transport Reservation & Dispatch (Node + Express + SQLite)
 Run: configure `APP_SECRET`, `SEED_ADMIN_PHONE`, and `SEED_ADMIN_PIN` in the environment, then `npm install && npm start` → http://localhost:3000 · Test: `npm test`
-No demo accounts are created for fresh databases. Existing databases retain their data, so review and rotate any legacy demo users manually. On a fresh database, set `SEED_ADMIN_PHONE` and a unique `SEED_ADMIN_PIN` (6+ characters) to provision the initial admin. Set `APP_SECRET` to a unique random value of at least 32 characters in every environment; the app does not use a built-in secret fallback. Create station-scoped managers through the admin workflow.
+No demo accounts, stations, or routes are created for fresh databases. Existing databases retain their data, so review and rotate any legacy demo users manually. On a fresh database, set `SEED_ADMIN_PHONE` and a unique `SEED_ADMIN_PIN` (6+ characters) to provision the initial admin. Set `APP_SECRET` to a unique random value of at least 32 characters in every environment; the app does not use a built-in secret fallback. Create station-scoped managers through the admin workflow.
 Env: PORT, DB, CUTOFF_MIN(30), TRIP_MIN(60), SURGE_SEATS(4), SURGE_WAIT(30), JOB_MS(10000).
 Implements v1.1 policies: manager-controlled driver availability, mandatory weekly recurring confirmation (idempotent), automatic fair allocation + logged manager override, transactional capacity control, breakdown requeue, surge alerts, outbox notifications, audit log, station scoping.
 Architecture: server.js modules = auth, bookings, recurring, fleet, dispatch, manager, admin; SQLite constraints (unique refs/occurrences, partial unique index = one active assignment per booking, CHECKs). Frontend: public/index.html (vanilla, Bootstrap CDN, mobile first).
-Not included: real SMS gateway, SignalR-style push (UI polls every 20s), password login, DB backups (copy transport.db).
+Not included: SignalR-style push (UI polls every 20s), password login, DB backups (copy transport.db).
 
 ## v1.2 additions
 - PATCH `/bookings/:id` (re-queues and reallocates; assigned seats are released), PATCH `/recurring/:id` (applies to unconfirmed weeks only), manager `POST /manager/bookings/:id/no-show` (before departure).
@@ -17,10 +17,10 @@ Not included: real SMS gateway, SignalR-style push (UI polls every 20s), passwor
 - `GET /bookings?page=&limit=` (+ `X-Total-Count`), `Idempotency-Key` header or `idempotencyKey` body on `POST /bookings`.
 
 ## v1.3 – going live
-- **Messaging:** `gateway.js` (`SMS_PROVIDER=twilio|http`; console delivery is test-only; WhatsApp via `NOTIFY_CHANNEL=whatsapp` with Twilio, needs approved templates). Notifications go through a DB outbox: retries with backoff (5 attempts → Failed), per-user hourly SMS cap, delivery callbacks at `POST /webhooks/sms-status?key=WEBHOOK_KEY`. OTPs are sent directly (retried once), never stored in plaintext.
+- **Messaging:** SMS/WhatsApp credentials are configured per tenant under Admin > API settings. Notifications go through a DB outbox: retries with backoff (5 attempts → Failed), per-user hourly SMS cap, tenant-keyed delivery callbacks at `POST /webhooks/sms-status`. Notifications without a tenant or configured SMS provider remain in-app; there is no console or development OTP delivery.
 - **Auth:** OTP hashed, 5 wrong tries burns it, 3 OTP requests/10 min/phone, IP limits, sessions table (hashed tokens, expiry 7d users / 12h staff, `/auth/logout`, `/auth/logout-all`, revoked on role/PIN change). Registration requires a 6+ character PIN. Passengers can recover a forgotten PIN using phone OTP; successful reset revokes existing sessions. Managers/admins also need a PIN (scrypt, lock after 5 failures); `POST /admin/users/:id/pin`, `POST /admin/managers` takes `pin`.
-- **Deploy:** `cp .env.example .env`, set distinct random values for `APP_SECRET`, `WEBHOOK_KEY`, and `HEALTH_KEY` (for example, generate each with `openssl rand -hex 32`), and provide the initial admin phone/PIN before `docker compose up -d` (Caddy gives automatic HTTPS). Production can start before payment/SMS credentials are configured; sign in with the seeded admin phone/PIN and add provider credentials in the Platform admin panel. OTP delivery and payment operations are unavailable until their providers are configured. `APP_SECRET` and first-admin settings are required on fresh databases in every environment; OTP is never echoed in production.
-- **Payments:** `PAYMENT_PROVIDER=mock` is test-only. Eganow-backed actions require credentials and HTTPS provider URLs, which an admin can configure after first login; failed driver payouts can be retried by an in-scope manager, and each failed attempt is retained in payout history for audit.
+- **Deploy:** `cp .env.example .env`, set distinct random values for `APP_SECRET` and `HEALTH_KEY` (for example, generate each with `openssl rand -hex 32`), and provide the initial admin phone/PIN before `docker compose up -d` (Caddy gives automatic HTTPS). Sign in with the provisioned admin phone/PIN and configure each tenant's providers under Admin > API settings. OTP and payment operations remain unavailable for a tenant until its providers are configured. `APP_SECRET` and first-admin settings are required on fresh databases; OTP codes are never echoed.
+- **Payments:** Eganow credentials are encrypted and configured independently for each tenant under Admin > API settings. A route uses its tenant's credentials for collections, payouts, and fee collections; missing tenant credentials prevent a provider request. Country code, language, and mobile-money partners are system-supplied payload values, not tenant-entered fields. Failed driver payouts can be retried by an in-scope manager, and each failed attempt is retained in payout history for audit.
 - **Data:** versioned `migrations/*.sql` (existing DBs are adopted automatically). Verified online backups every `BACKUP_EVERY_H` hours (keeps `BACKUP_KEEP`), `npm run backup`, `npm run restore -- <file>` (stop the app first; also back up `/data/uploads` and copy backups off-server). SQLite is single-node; move to Postgres only if you outgrow one server.
 - **Live + offline:** Server-Sent Events replace polling (60 s fallback); PWA manifest + service worker cache the app shell and last-seen data (cleared on logout).
 - Limits are in-memory (single process). Run one instance.
@@ -41,13 +41,13 @@ Not included: real SMS gateway, SignalR-style push (UI polls every 20s), passwor
 - Document expiry: expiry dates on uploads, 30/7-day warnings, automatic un-verify on expiry (see docs/OPS.md).
 - WhatsApp: per-user opt-in, approved-template sending, automatic SMS fallback (needs Twilio/Meta approval, see docs/OPS.md).
 - Terms: fuller DRAFT with placeholders + versioned re-consent (`TERMS_VERSION`). It still needs a lawyer.
-- Monitoring: `/healthz/deep?key=`, admin "System health", alerts via webhook/SMS, backup dead-man's-switch ping.
+- Monitoring: `/healthz/deep?key=`, admin "System health", webhook alerts, backup dead-man's-switch ping.
 
 ## v1.6
 - Fare-based station and platform charges are snapshotted for each new booking. Riders see one total; administrators configure independent rider and driver percentages globally or by station. The driver payout uses the saved driver-side deductions.
-- Cash is opt-in by route/station/global configuration. Cash rides enter dispatch immediately; boarding creates a driver receivable for rider-side charges plus driver-side deductions. Drivers settle receivables with MoMo through the separate fee account.
+- Cash is opt-in by route/station/global configuration. Cash rides enter dispatch immediately; boarding creates a driver receivable for rider-side charges plus driver-side deductions. Drivers settle receivables with MoMo through their tenant's Eganow configuration.
 - Append-only fee ledger, station-scoped accountant role, fee reconciliation/reporting, approval-controlled waivers/manual settlements, and configurable overdue reminders.
-- Configure fee-account Eganow credentials with `FEES_EGANOW_*`. Production startup requires these credentials whenever cash is enabled. See [docs/OPS.md](docs/OPS.md) for reconciliation procedures.
+- Tenant Eganow settings are used for collections, payouts, and fee collections. See [docs/OPS.md](docs/OPS.md) for reconciliation procedures.
 
 ## Tenant stations, organizations, and fee allocation
 - A tenant represents a major station/location; terminals belong to that tenant. Organizations/unions can operate across one or more tenants.
@@ -61,7 +61,7 @@ Not included: real SMS gateway, SignalR-style push (UI polls every 20s), passwor
 
 ## Platform administration
 - Platform admins have a dedicated settings panel for Eganow, Twilio/HTTP SMS, WhatsApp and SMTP configuration, and existing user/station setup. Provider credentials are encrypted in SQLite with AES-256-GCM using a key derived from `APP_SECRET`; the API only reports whether a secret is configured. Keep `APP_SECRET` unchanged while encrypted settings exist and back up the database securely.
-- Settings entered in the admin panel are applied to the running process and persist in the database. `.env` values remain supported as deployment defaults. Production rejects mock/console providers and non-HTTPS provider URLs. On ephemeral hosts such as Render Free, settings stored in SQLite can be lost when the service restarts; use persistent storage or configure provider variables in the host environment for durable operation.
+- Tenant provider settings entered in Admin > API settings are encrypted where secret and persist in SQLite. In production, provider URLs must use HTTPS. The system payload defaults `EGANOW_DEFAULT_COUNTRY_CODE`, `EGANOW_DEFAULT_LANGUAGE`, and `EGANOW_MOMO_PARTNERS` can be set in the environment. On ephemeral hosts such as Render Free, database settings can be lost when the service restarts; use persistent storage.
 - Fee percentage settings are maintained in the admin “Fees & charges” card and apply to new bookings only. Fee payer shares are configured separately by platform, tenant, or organization scope. The quote endpoint and passenger screens expose one total rather than a breakdown.
 - SMTP settings can be managed by an admin, but user notifications are currently delivered through the SMS/WhatsApp notification pipeline; email delivery is not yet attached to user accounts.
 

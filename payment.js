@@ -31,12 +31,14 @@ function isMomoPayPartner(paypartnerCode) {
 }
 
 class EganowPaymentProvider {
-  constructor(envPrefix = 'EGANOW') {
+  constructor(envPrefix = 'EGANOW', config = null) {
     this.name = 'eganow';
     this.envPrefix = envPrefix;
+    this.config = config;
   }
 
   env(name, fallback) {
+    if (this.config) return this.config[`${this.envPrefix}_${name}`] ?? fallback;
     return readEnv(`${this.envPrefix}_${name}`, fallback);
   }
 
@@ -168,6 +170,7 @@ class EganowPaymentProvider {
     if (!this.getSupportedPayPartners().includes(paypartnerCode)) {
       throw new Error(`Unsupported payment partner for Eganow MoMo integration: ${paypartnerCode}`);
     }
+    normalizedPayload.paypartnerCode = paypartnerCode;
 
     if (!normalizedPayload.languageId) normalizedPayload.languageId = this.getDefaultLanguage();
     if (!normalizedPayload.transCurrencyIso) normalizedPayload.transCurrencyIso = 'GHS';
@@ -197,6 +200,7 @@ class EganowPaymentProvider {
     if (!this.getSupportedPayPartners().includes(paypartnerCode)) {
       throw new Error(`Unsupported payment partner for Eganow MoMo integration: ${paypartnerCode}`);
     }
+    normalizedPayload.paypartnerCode = paypartnerCode;
 
     if (!normalizedPayload.languageId) normalizedPayload.languageId = this.getDefaultLanguage();
     if (!normalizedPayload.transCurrencyIso) normalizedPayload.transCurrencyIso = 'GHS';
@@ -263,32 +267,9 @@ class EganowPaymentProvider {
   }
 }
 
-function createPaymentProvider(name = process.env.PAYMENT_PROVIDER || 'eganow', { envPrefix = 'EGANOW' } = {}) {
-  if (name === 'mock' && process.env.NODE_ENV !== 'test') {
-    throw new Error('PAYMENT_PROVIDER=mock is only allowed in tests');
-  }
-
-  const providers = {
-    eganow: () => new EganowPaymentProvider(envPrefix),
-    mock: () => ({
-      name: 'mock',
-      getSupportedPayPartners: () => parsePartnerList(readEnv(`${envPrefix}_MOMO_PARTNERS`, DEFAULT_MOMO_PARTNERS)),
-      getAccessToken: async () => ({ bearerToken: 'mock-token' }),
-      verifyAccessToken: async () => ({ isValid: true }),
-      initiateCollection: async (payload) => ({ ok: true, payload, provider: 'mock' }),
-      initiatePayout: async (payload) => ({ ok: true, payload, provider: 'mock' }),
-      getTransactionStatus: async () => ({ isSuccess: true, transactionstatus: 'SUCCESSFUL' }),
-      verifyKyc: async () => ({ isSuccess: true, accountName: 'MOCK ACCOUNT' }),
-      getCollectionBalance: async () => ({ balance: 0 }),
-      getPayoutBalance: async () => ({ balance: 0 }),
-    }),
-  };
-
-  if (!providers[name]) {
-    throw new Error(`Unsupported payment provider: ${name}`);
-  }
-
-  return providers[name]();
+function createPaymentProvider(name = 'eganow', { envPrefix = 'EGANOW', config = null } = {}) {
+  if (name !== 'eganow') throw new Error(`Unsupported payment provider: ${name}`);
+  return new EganowPaymentProvider(envPrefix, config);
 }
 
 function isSupportedPayPartner(provider, paypartnerCode) {

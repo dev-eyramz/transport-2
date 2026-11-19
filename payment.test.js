@@ -26,17 +26,11 @@ test('provider validates supported MoMo partners only', () => {
   assert.equal(isSupportedPayPartner(provider, 'UNSUPPORTED'), false);
 });
 
-test('mock payment provider is restricted to tests', () => {
-  const original = process.env.NODE_ENV;
-  try {
-    process.env.NODE_ENV = 'production';
-    assert.throws(() => createPaymentProvider('mock'), /only allowed in tests/);
-    process.env.NODE_ENV = 'test';
-    assert.equal(createPaymentProvider('mock').name, 'mock');
-  } finally {
-    if (original === undefined) delete process.env.NODE_ENV;
-    else process.env.NODE_ENV = original;
-  }
+test('tenant provider credentials do not inherit platform environment credentials', () => {
+  const provider = createPaymentProvider('eganow', { config: {} });
+  assert.equal(provider.getApiUsername(), '');
+  assert.equal(provider.getApiPassword(), '');
+  assert.throws(() => createPaymentProvider('mock'), /Unsupported payment provider/);
 });
 
 test('fee provider reads credentials and partner configuration from its own prefix', () => {
@@ -57,6 +51,93 @@ test('provider builds auth headers and endpoints from config', async () => {
   const headers = provider.buildAuthHeaders('demo-token');
   assert.equal(headers.Authorization, 'Bearer demo-token');
   assert.equal(headers['x-Auth'], 'x-auth-secret');
+});
+
+test('collection initiation authenticates and normalizes its payment payload', async () => {
+  const provider = createPaymentProvider();
+  const originalFetch = global.fetch;
+  const requests = [];
+  global.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    const body = requests.length === 1
+      ? { developerJwtToken: 'collection-token' }
+      : { transactionstatus: 'PENDING' };
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  try {
+    const result = await provider.initiateCollection({
+      amount: '12.50',
+      transactionId: 'TP-123',
+      paypartnerCode: 'mtngh',
+      accountNoOrCardNoOrMSISDN: '0244 123 456',
+    });
+    assert.equal(result.transactionstatus, 'PENDING');
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].url, 'https://developer.sandbox.egacoreapi.com/api/auth/token');
+    assert.equal(requests[0].options.headers.Authorization, `Basic ${Buffer.from('merchant-user:merchant-pass').toString('base64')}`);
+    assert.equal(requests[1].url, 'https://developer.sandbox.egacoreapi.com/api/transactions/collection');
+    assert.equal(requests[1].options.headers.Authorization, 'Bearer collection-token');
+    assert.equal(requests[1].options.headers['x-Auth'], 'x-auth-secret');
+    assert.deepEqual(JSON.parse(requests[1].options.body), {
+      amount: '12.50',
+      transactionId: 'TP-123',
+      paypartnerCode: 'MTNGH',
+      accountNoOrCardNoOrMSISDN: '233244123456',
+      languageId: 'en',
+      transCurrencyIso: 'GHS',
+      callback: '',
+      countryCode: 'GH0233',
+    });
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('payout and transaction-status requests use the configured Eganow endpoints', async () => {
+  const provider = createPaymentProvider();
+  const originalFetch = global.fetch;
+  const requests = [];
+  global.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    const body = requests.length === 1
+      ? { accessToken: 'payout-token' }
+      : requests.length === 2
+        ? { transactionstatus: 'PENDING' }
+        : requests.length === 3
+          ? { accessToken: 'status-token' }
+          : { transactionstatus: 'SUCCESSFUL' };
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  try {
+    await provider.initiatePayout({
+      amount: '10.25',
+      transactionId: 'TPPO-123',
+      paypartnerCode: 'atgh',
+      accountNoOrCardNoOrMSISDN: '+233 244 123 456',
+    });
+    const status = await provider.getTransactionStatus({ transactionId: 'TPPO-123' });
+    assert.equal(status.transactionstatus, 'SUCCESSFUL');
+    assert.equal(requests[1].url, 'https://developer.sandbox.egacoreapi.com/api/transactions/payout');
+    assert.equal(requests[1].options.headers.Authorization, 'Bearer payout-token');
+    assert.deepEqual(JSON.parse(requests[1].options.body), {
+      amount: '10.25',
+      transactionId: 'TPPO-123',
+      paypartnerCode: 'ATGH',
+      accountNoOrCardNoOrMSISDN: '233244123456',
+      languageId: 'en',
+      transCurrencyIso: 'GHS',
+      callback: '',
+      countryCode: 'GH0233',
+    });
+    assert.equal(requests[3].url, 'https://developer.sandbox.egacoreapi.com/api/transactions/status');
+    assert.equal(requests[3].options.headers.Authorization, 'Bearer status-token');
+    assert.deepEqual(JSON.parse(requests[3].options.body), {
+      transactionId: 'TPPO-123',
+      languageId: 'en',
+    });
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test('Eganow provider requires an explicit HTTPS endpoint', () => {

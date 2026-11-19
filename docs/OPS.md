@@ -4,7 +4,7 @@
 **External (is the whole app down?)** Point an uptime service (UptimeRobot, Better Stack, Pingdom) at
 `https://YOUR-DOMAIN/healthz/deep?key=HEALTH_KEY` every 1-5 min. It returns 200 only when the database, backups, messaging queue and scheduler are all healthy, otherwise 503 with the failing checks.
 **Backups dead-man's switch:** create a free check at healthchecks.io, put its URL in `BACKUP_PING_URL`; it alerts you if backups stop.
-**Internal alerts (app-detected)** go to `ALERT_WEBHOOK` (Slack/Discord/Telegram-bridge URL, works even if SMS is down) and optionally `ALERT_PHONES` (comma-separated). Triggers: backup failure, 5 consecutive message-send failures, OTP SMS failure, stale backup (> 2 intervals), messages stuck > 15 min, 5+ failed messages/hour, scheduler silent > 60 s. Repeats are suppressed for `ALERT_COOLDOWN_MIN` (60). Admins also see "System health" at the top of their screen.
+**Internal alerts (app-detected)** go to `ALERT_WEBHOOK` (Slack/Discord/Telegram-bridge URL). Triggers: backup failure, 5 consecutive message-send failures, OTP SMS failure, stale backup (> 2 intervals), messages stuck > 15 min, 5+ failed messages/hour, scheduler silent > 60 s. Repeats are suppressed for `ALERT_COOLDOWN_MIN` (60). Admins also see "System health" at the top of their screen.
 **Test it:** set `ALERT_WEBHOOK`, stop the SMS credentials, make 5 bookings that trigger notifications: you should receive an alert.
 
 ## 2. WhatsApp via Twilio (needs your approval steps)
@@ -24,10 +24,10 @@
 Drivers enter an expiry date with licence/insurance/roadworthy uploads. Warnings at 30 and 7 days (driver, then managers), and on the expiry date the document becomes Expired, a licence un-verifies the driver and a vehicle document revokes the vehicle's dispatch approval until a new document is verified.
 
 ## 5. Fee-account setup and reconciliation
-- Configure `FEES_EGANOW_BASE_URL`, `FEES_EGANOW_API_USERNAME`, `FEES_EGANOW_API_PASSWORD`, and `FEES_EGANOW_X_AUTH` with credentials dedicated to the fee account. Optional callback, country, language, and partner settings use the `FEES_EGANOW_*` prefix. Do not reuse the passenger-collection or driver-payout credentials.
-- Production can start before payment and SMS credentials are configured. The seeded admin can sign in with the initial phone and PIN and configure Eganow and SMS in Platform admin; OTP delivery and provider-backed transactions will fail until setup is complete. Production still rejects mock payments, console messaging, and configured provider URLs that are not HTTPS. Keep `APP_SECRET` stable so saved credentials remain decryptable.
-- Production refuses to start if any effective route enables cash while a fee-account credential is missing. Set `cash_enabled` to `1` only after verifying the fee account can collect MoMo. Payment mocks and console messaging are restricted to tests.
-- On Render Free, the SQLite database and credentials saved through Platform admin are on an ephemeral filesystem and can be lost on restart or spin-down. For durable settings, use a persistent disk or configure provider credentials in Render's environment settings.
+- Configure each tenant's Eganow, SMS, and SMTP settings in Admin > API settings. Collections, payouts, and fee collections use the route tenant's Eganow credentials; SMS and WhatsApp use the notification tenant's settings. Missing tenant settings block provider calls, and unscoped notifications stay in-app.
+- Country code, language, and mobile-money partners are system-supplied Eganow payload defaults (`EGANOW_DEFAULT_COUNTRY_CODE`, `EGANOW_DEFAULT_LANGUAGE`, and `EGANOW_MOMO_PARTNERS`). These cannot be set in a tenant's API settings.
+- Provider credentials are encrypted with `APP_SECRET`. Use HTTPS for configured provider URLs in production, and keep `APP_SECRET` stable so saved tenant credentials remain decryptable.
+- On Render Free, tenant settings live in SQLite and can be lost on restart or spin-down. Use a persistent disk for durable settings.
 - Review `/reports/fees` by date and station. Match digital `rider_charge` and `driver_deduction` entries against provider settlement records; the fee ledger records the charges but does not initiate transfers to the fee account.
 - For cash rides, reconcile `fee_receivables` and driver MoMo collections daily. Check pending/NeedsReview collections with the driver before retrying; successful status checks allocate oldest receivables first. Compare settled receivable amounts with `cash_settlement` ledger rows.
 - Record waivers or manual settlements with a reason. When `fee_manual_needs_approval=1`, a different station manager/accountant must approve; review the associated audit entry before closing the reconciliation period.
