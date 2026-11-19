@@ -2353,6 +2353,8 @@ summary {
   min-height: 0;
   flex: 1 1 auto;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
   gap: 12px;
   overflow: hidden;
 }
@@ -2434,8 +2436,34 @@ summary {
 }
 
 @media (max-width: 860px) {
-  .manager-sections {
+  .transport-shell {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
+  #app {
+    flex: 1 0 auto;
+    overflow: visible;
+    scrollbar-gutter: auto;
+  }
+
+  .portal-dashboard.manager-dashboard {
+    display: grid;
+    height: auto;
     grid-template-columns: minmax(0, 1fr);
+    overflow: visible;
+  }
+
+  .manager-sections {
+    flex: none;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
+    overflow: visible;
+  }
+
+  .manager-column {
+    overflow: visible;
   }
 
   .access-rights-list {
