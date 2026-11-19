@@ -2331,11 +2331,7 @@ summary {
 }
 
 .portal-content {
-  align-items: stretch;
-}
-
-.portal-content > .card {
-  height: 100%;
+  align-items: start;
 }
 
 .portal-dashboard .card-header {
@@ -2367,10 +2363,6 @@ summary {
 .portal-content .table th,
 .portal-content .table td {
   white-space: normal;
-}
-
-.manager-sections > .card {
-  height: 100%;
 }
 
 .admin-foldable {
