@@ -1611,3 +1611,243 @@ input[type="checkbox"] {
 .invitation-created a {
   overflow-wrap: anywhere;
 }
+
+/* Shared operations workspace refinements */
+:root {
+  --page: #f3f6f9;
+  --panel-alt: #f6f8fb;
+  --panel-strong: #e9eff5;
+  --line: #d9e2ea;
+  --text: #182b3d;
+  --muted: #65778a;
+  --primary: #087f8c;
+  --primary-strong: #066b75;
+  --card-border: #dce4eb;
+  --shadow: 0 10px 28px rgba(24, 43, 61, .055);
+}
+
+body {
+  background:
+    radial-gradient(ellipse at 8% 0%, rgba(8, 127, 140, .045), transparent 28rem),
+    var(--page);
+}
+
+.transport-shell {
+  width: min(100%, 1520px);
+}
+
+.app-header.active {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto minmax(220px, 1fr);
+  gap: 20px;
+  border-color: #d9e3ea;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, .96);
+  box-shadow: 0 6px 20px rgba(24, 43, 61, .055);
+}
+
+.app-brand-mark {
+  border: 1px solid #d5eaea;
+  background: linear-gradient(145deg, #e8f7f5, #d9f0ee);
+}
+
+.app-brand-copy span {
+  letter-spacing: .015em;
+}
+
+.app-header-context {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: .77rem;
+}
+
+.workspace-role,
+.workspace-scope,
+.app-header-context time {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  padding: 5px 10px;
+  border: 1px solid #e1e8ee;
+  border-radius: 999px;
+  background: #f8fafb;
+  white-space: nowrap;
+}
+
+.workspace-role {
+  border-color: #cce7e5;
+  background: #edf8f7;
+  color: #076b73;
+  font-weight: 750;
+}
+
+.app-user {
+  justify-content: flex-end;
+}
+
+.app-user-copy strong {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-header .btn {
+  min-width: 84px;
+}
+
+.portal-hero {
+  border-radius: 18px;
+  box-shadow: 0 8px 24px rgba(24, 43, 61, .045);
+}
+
+.portal-hero h1 {
+  letter-spacing: -.045em;
+}
+
+.portal-stat {
+  border-radius: 14px;
+  box-shadow: 0 4px 14px rgba(24, 43, 61, .03);
+}
+
+.portal-content {
+  gap: 16px;
+}
+
+.portal-content > .card,
+.card.page-card {
+  border-radius: 15px;
+  box-shadow: 0 5px 18px rgba(24, 43, 61, .035);
+}
+
+.portal-dashboard .card-header,
+.card-header {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  background: #fff;
+}
+
+.portal-dashboard .card-body,
+.card-body {
+  scrollbar-color: #cbd7e1 transparent;
+  scrollbar-width: thin;
+}
+
+.table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid #e2e9ef;
+  background: #f6f8fa;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: 1px solid #e8eef4;
+}
+
+.table tbody tr:hover td {
+  background: #f8fbfc;
+}
+
+.form-control,
+.form-select {
+  border-color: #ced9e2;
+}
+
+.form-control:disabled,
+.form-select:disabled,
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: .62;
+}
+
+.btn {
+  font-weight: 720;
+}
+
+.btn-danger,
+.btn-danger:hover {
+  border-color: #edc4c7;
+  background: #fff4f4;
+  color: #9a2932;
+}
+
+.empty-state {
+  border-color: #cfdae4;
+  background: #f8fafb;
+}
+
+.admin-foldable > .card-header::after {
+  flex-basis: 28px;
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  font-size: 1rem;
+}
+
+@media (max-width: 860px) {
+  .app-header.active {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .app-header-context {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-content: flex-start;
+    padding-left: 53px;
+  }
+}
+
+@media (max-width: 560px) {
+  .app-header.active {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+
+  .app-brand-copy span {
+    display: block;
+    font-size: .68rem;
+  }
+
+  .app-header-context {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    gap: 6px;
+    padding-left: 0;
+    font-size: .7rem;
+  }
+
+  .workspace-role,
+  .workspace-scope,
+  .app-header-context time {
+    min-height: 27px;
+    padding: 4px 8px;
+  }
+
+  .app-header .btn {
+    min-height: 38px;
+    min-width: auto;
+    padding: .5rem .7rem;
+  }
+
+  .portal-content {
+    gap: 12px;
+  }
+
+  .portal-dashboard .table {
+    min-width: 500px;
+  }
+}
+
+@media (max-width: 380px) {
+  .workspace-scope {
+    max-width: 42vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
