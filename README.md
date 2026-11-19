@@ -48,6 +48,7 @@ Not included: SignalR-style push (UI polls every 20s), password login, DB backup
 - Cash is opt-in by route/station/global configuration. Cash rides enter dispatch immediately; boarding creates a driver receivable for rider-side charges plus driver-side deductions. Drivers settle receivables with MoMo through their tenant's Eganow configuration.
 - Append-only fee ledger, station-scoped accountant role, fee reconciliation/reporting, approval-controlled waivers/manual settlements, and configurable overdue reminders.
 - Tenant Eganow settings are used for collections, payouts, and fee collections. See [docs/OPS.md](docs/OPS.md) for reconciliation procedures.
+- The Accounting ledger adds an append-only, double-entry GHS journal: digital fares are driver payables, allocated fees are income, successful payouts/fee collections and cash-trip fee receivables are posted automatically, and approved waivers/manual settlements are recorded. Admins see the consolidated books; accountants see their assigned station, tenant, or organization scope. The ledger card includes account balances, income/expense summaries, reconciliation alerts, CSV exports, and manual operating-expense entries with reversal support. This management ledger is not a substitute for professional review of tax, statutory, or entity-specific accounting treatment.
 
 ## Tenant stations, organizations, and fee allocation
 - A tenant represents a major station/location; terminals belong to that tenant. Organizations/unions can operate across one or more tenants.

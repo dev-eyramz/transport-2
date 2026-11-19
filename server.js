@@ -80,6 +80,57 @@ function snapshotBookingFees(booking,route,entryType='charge'){
 }
 function reverseBookingFees(booking){q(`select organization_id,origin_tenant_id,fee_kind,stream,payer_type,payer_id,recipient_type,recipient_id,payer_percentage,sum(amount_pesewas) amount
  from booking_fee_allocations where booking_id=? group by organization_id,origin_tenant_id,fee_kind,stream,payer_type,payer_id,recipient_type,recipient_id,payer_percentage having amount<>0`,booking.id).forEach(row=>run('insert into booking_fee_allocations(booking_id,organization_id,origin_tenant_id,fee_kind,stream,payer_type,payer_id,recipient_type,recipient_id,amount_pesewas,payer_percentage,entry_type,created_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',booking.id,row.organization_id,row.origin_tenant_id,row.fee_kind,row.stream,row.payer_type,row.payer_id,row.recipient_type,row.recipient_id,-row.amount,row.payer_percentage,'reversal',now()))}
+const ledgerAccountCodes={platform:'4000',tenant:'4100',organization:'4200'},ledgerAccountId=code=>{const account=one('select id from ledger_accounts where code=? and active=1',code);if(!account)throw new Error(`Accounting account ${code} is unavailable`);return account.id};
+function postLedgerTransaction({sourceType,sourceId,tenantId=null,organizationId=null,stationId=null,effectiveAt=now(),memo,reference=null,createdBy=null,lines}){
+ const entries=lines.filter(line=>line.debit||line.credit);
+ if(!entries.length)return null;
+ if(entries.some(line=>!Number.isSafeInteger(line.debit||0)||!Number.isSafeInteger(line.credit||0)||(line.debit||0)<0||(line.credit||0)<0||!!line.debit==!!line.credit))throw new Error('Invalid accounting journal line');
+ const debits=entries.reduce((sum,line)=>sum+line.debit,0),credits=entries.reduce((sum,line)=>sum+line.credit,0);
+ if(debits<=0||debits!=credits)throw new Error(`Unbalanced accounting transaction ${sourceType}:${sourceId} (${debits} debit, ${credits} credit)`);
+ return db.transaction(()=>{
+  const existing=one('select id from ledger_transactions where source_type=? and source_id=?',sourceType,String(sourceId));if(existing)return existing.id;
+  const id=run('insert into ledger_transactions(source_type,source_id,tenant_id,organization_id,station_id,effective_at,memo,reference,created_by,created_at) values(?,?,?,?,?,?,?,?,?,?)',sourceType,String(sourceId),tenantId,organizationId,stationId,effectiveAt,String(memo).slice(0,240),reference,createdBy,now()).lastInsertRowid;
+  entries.forEach((line,index)=>run('insert into ledger_entries(transaction_id,line_number,account_id,debit_pesewas,credit_pesewas) values(?,?,?,?,?)',id,index+1,ledgerAccountId(line.account),line.debit||0,line.credit||0));
+  return id
+ })()
+}
+const ledgerRevenueLines=(bookingId,stream,payerType=null)=>q(`select recipient_type,sum(amount_pesewas) amount from booking_fee_allocations where booking_id=? and stream=? ${payerType?"and payer_type=?":""} group by recipient_type order by recipient_type`,...(payerType?[bookingId,stream,payerType]:[bookingId,stream])).filter(row=>row.amount>0);
+function postBookingCollection(paymentId){
+ const payment=one("select * from booking_payments where id=? and status='Succeeded'",paymentId);if(!payment)return null;
+ const booking=one('select b.*,r.tenant_id,r.organization_id,r.origin_id station_id from bookings b join routes r on r.id=b.route_id where b.id=?',payment.booking_id);if(!booking)throw new Error(`Booking ${payment.booking_id} for payment ${payment.id} is missing`);
+ const paidBefore=one("select coalesce(sum(amount_pesewas),0) amount from booking_payments where booking_id=? and status='Succeeded' and id<?",booking.id,payment.id).amount,total=bookingTotal(booking),before=Math.min(total,paidBefore),after=Math.min(total,paidBefore+payment.amount_pesewas),fareCredit=Math.max(0,Math.min(after,booking.fare_pesewas)-Math.min(before,booking.fare_pesewas)),feeStart=Math.max(0,before-booking.fare_pesewas),feeEnd=Math.max(0,after-booking.fare_pesewas),feeRows=ledgerRevenueLines(booking.id,'rider'),lines=[{account:'1000',debit:payment.amount_pesewas,credit:0}];
+ if(fareCredit)lines.push({account:'2000',debit:0,credit:fareCredit});
+ let cursor=0,feeCredit=0;
+ for(const row of feeRows){const end=cursor+row.amount,amount=Math.max(0,Math.min(feeEnd,end)-Math.max(feeStart,cursor));cursor=end;if(amount){lines.push({account:ledgerAccountCodes[row.recipient_type],debit:0,credit:amount});feeCredit+=amount}}
+ const suspense=payment.amount_pesewas-fareCredit-feeCredit;if(suspense>0)lines.push({account:'2990',debit:0,credit:suspense});
+ return postLedgerTransaction({sourceType:'booking_payment',sourceId:payment.id,tenantId:booking.tenant_id,organizationId:booking.organization_id,stationId:booking.station_id,effectiveAt:payment.updated_at,memo:`Passenger collection for ${booking.ref}`,reference:payment.transaction_id,lines})
+}
+function postDriverPayout(payoutId){
+ const payout=one("select p.*,b.fare_pesewas,b.ref,r.tenant_id,r.organization_id,r.origin_id station_id from driver_payouts p join bookings b on b.id=p.booking_id join routes r on r.id=b.route_id where p.id=? and p.status='Succeeded'",payoutId);if(!payout)return null;
+ if(payout.amount_pesewas>payout.fare_pesewas)throw new Error(`Driver payout ${payout.id} exceeds booking fare`);
+ const deduction=payout.fare_pesewas-payout.amount_pesewas,feeRows=ledgerRevenueLines(payout.booking_id,'driver','driver'),lines=[{account:'2000',debit:payout.fare_pesewas,credit:0},{account:'1000',debit:0,credit:payout.amount_pesewas}];
+ let cursor=0,revenueCredit=0;
+ for(const row of feeRows){const amount=Math.max(0,Math.min(deduction,cursor+row.amount)-cursor);cursor+=row.amount;if(amount){lines.push({account:ledgerAccountCodes[row.recipient_type],debit:0,credit:amount});revenueCredit+=amount}}
+ const suspense=deduction-revenueCredit;if(suspense>0)lines.push({account:'2990',debit:0,credit:suspense});
+ return postLedgerTransaction({sourceType:'driver_payout',sourceId:payout.id,tenantId:payout.tenant_id,organizationId:payout.organization_id,stationId:payout.station_id,effectiveAt:payout.updated_at,memo:`Driver payout for ${payout.ref}`,reference:payout.transaction_id,lines})
+}
+function postCashFeeReceivable(receivableId){
+ const row=one('select r.*,b.ref,b.route_id,b.organization_id,s.tenant_id booking_tenant from fee_receivables r join bookings b on b.id=r.booking_id join stations s on s.id=r.station_id where r.id=?',receivableId);if(!row)return null;
+ const amount=row.station_pesewas+row.platform_pesewas+row.loading_pesewas;if(!amount)return null;
+ const feeRows=q(`select recipient_type,sum(amount_pesewas) amount from booking_fee_allocations where booking_id=? and payer_type in('rider','driver') group by recipient_type order by recipient_type`,row.booking_id).filter(item=>item.amount>0),lines=[{account:'1100',debit:amount,credit:0}];let credited=0;
+ for(const fee of feeRows){const part=Math.min(fee.amount,amount-credited);if(part>0){lines.push({account:ledgerAccountCodes[fee.recipient_type],debit:0,credit:part});credited+=part}}
+ if(credited<amount)lines.push({account:'2990',debit:0,credit:amount-credited});
+ return postLedgerTransaction({sourceType:'cash_fee_receivable',sourceId:row.id,tenantId:row.booking_tenant,organizationId:row.organization_id,stationId:row.station_id,effectiveAt:row.created_at,memo:`Cash-trip fee receivable for ${row.ref}`,lines})
+}
+function postFeeCollection(collectionId){
+ const row=one("select c.*,d.station_id,d.tenant_id,d.organization_id from fee_collections c join drivers d on d.user_id=c.driver_id where c.id=? and c.status='Succeeded'",collectionId);if(!row)return null;
+ return postLedgerTransaction({sourceType:'fee_collection',sourceId:row.id,tenantId:row.tenant_id||tenantForStation(row.station_id),organizationId:row.organization_id,stationId:row.station_id,effectiveAt:row.updated_at,memo:'Driver fee collection',reference:row.transaction_id,lines:[{account:'1000',debit:row.amount_pesewas,credit:0},{account:'1100',debit:0,credit:row.amount_pesewas}]})
+}
+function postFeeAdjustment(allocationId){
+ const row=one(`select a.*,r.booking_id,r.station_id,b.ref,b.organization_id,s.tenant_id from fee_allocations a join fee_receivables r on r.id=a.receivable_id join bookings b on b.id=r.booking_id join stations s on s.id=r.station_id where a.id=? and a.kind in('waiver','manual_settlement')`,allocationId);if(!row)return null;
+ const waiver=row.kind=='waiver';
+ return postLedgerTransaction({sourceType:'fee_adjustment',sourceId:row.id,tenantId:row.tenant_id,organizationId:row.organization_id,stationId:row.station_id,effectiveAt:row.created_at,memo:`${waiver?'Fee waiver':'Manual fee settlement'} for ${row.ref}`,createdBy:row.approved_by||row.recorded_by,lines:[{account:waiver?'6100':'1010',debit:row.amount_pesewas,credit:0},{account:'1100',debit:0,credit:row.amount_pesewas}]})
+}
 const hashPin=p=>{const s=cr.randomBytes(8).toString('hex');return s+':'+cr.scryptSync(String(p),s,32).toString('hex')};
 const okPin=(p,h)=>{if(!h||!p)return false;const[s,x]=h.split(':');return cr.timingSafeEqual(Buffer.from(x,'hex'),cr.scryptSync(String(p),s,32))};
 if(!one("select 1 x from users where role='admin'")){
@@ -199,7 +250,7 @@ const api=express.Router(),H=f=>(req,res)=>{bad=e=>res.status(e.s||(/UNIQUE|CHEC
 const sessionCookieOptions={httpOnly:true,secure:PROD,sameSite:'strict',path:'/api/v1'};
 const SH=f=>H((req,res)=>{const issue=result=>{if(!result?.token)return result;res.cookie('session',result.token,{...sessionCookieOptions,expires:new Date(result.expiresAt)});return result};const result=f(req,res);return result&&typeof result.then==='function'?result.then(issue):issue(result)});
 const ROLE=(...r)=>(req,res,n)=>r.includes(req.u.role)||(req.u.role=='admin'&&r.includes('manager'))?n():res.status(403).json({error:'Forbidden'});
-const ACCESS_PERMISSIONS=['users.read','users.update','users.deactivate','vehicles.read','vehicles.create','vehicles.update','vehicles.deactivate','onboarding.invite','onboarding.read','onboarding.review','routes.publish'],ACCESS_ROLES=['manager','accountant','driver','passenger','porter'];
+const ACCESS_PERMISSIONS=['users.read','users.update','users.deactivate','vehicles.read','vehicles.create','vehicles.update','vehicles.deactivate','onboarding.invite','onboarding.read','onboarding.review','routes.publish','accounting.read','accounting.expense'],ACCESS_ROLES=['manager','accountant','driver','passenger','porter'];
 const hasPermission=(u,permission)=>u.role=='admin'||!!one('select 1 x from role_permissions where role=? and permission=?',u.role,permission);
 const PERM=(permission,...roles)=>(req,res,n)=>req.u.role=='admin'||roles.includes(req.u.role)&&hasPermission(req.u,permission)?n():res.status(403).json({error:'Forbidden'});
 const STATION_STAFF=['manager','accountant'],mgr=ROLE('manager','accountant'),tenantForStation=id=>one('select tenant_id from stations where id=?',id)?.tenant_id||null,tenantForUser=u=>u.tenant_id||tenantForStation(u.station_id),scope=u=>u.role=='admin'?q('select id from routes').map(r=>r.id):u.organization_id?q('select id from routes where organization_id=?',u.organization_id).map(r=>r.id):u.tenant_id?q('select id from routes where tenant_id=?',u.tenant_id).map(r=>r.id):u.station_id?q('select id from routes where origin_id=?',u.station_id).map(r=>r.id):[];
@@ -804,7 +855,7 @@ function applyPaymentResult(paymentId,result){
  const outcome=providerOutcome(result),statusText=String(result?.transactionstatus||result?.transactionStatus||result?.status||result?.data?.status||'').slice(0,40)||null;
  db.transaction(()=>{run('update booking_payments set status=?,response_status=?,updated_at=? where id=?',outcome,statusText,now(),p.id);
   if(outcome=='Succeeded'){const b=one('select * from bookings where id=?',p.booking_id),total=bookingTotal(b),paid=Math.min(total,b.paid_pesewas+p.amount_pesewas),st=paid>=total?'Paid':'Partial';
-   run('update bookings set paid_pesewas=?,payment_status=? where id=?',paid,st,b.id);if(st=='Paid')ledgerRiderCharges(b);notify(b.passenger_id,'Payment received',`Payment received for booking ${b.ref}. ${st=='Paid'?'Your booking is in the dispatch queue.':'Remaining balance: GHS '+ghs(total-paid)+'.'}`,tenantForRoute(b.route_id))}})();
+   run('update bookings set paid_pesewas=?,payment_status=? where id=?',paid,st,b.id);postBookingCollection(p.id);if(st=='Paid')ledgerRiderCharges(b);notify(b.passenger_id,'Payment received',`Payment received for booking ${b.ref}. ${st=='Paid'?'Your booking is in the dispatch queue.':'Remaining balance: GHS '+ghs(total-paid)+'.'}`,tenantForRoute(b.route_id))}})();
  if(outcome=='Succeeded')allocate();return one('select * from booking_payments where id=?',paymentId)}
 api.post('/bookings/:id/pay',P,H(async req=>{
  const b=one('select * from bookings where id=? and passenger_id=?',req.params.id,req.u.id);if(!b)E(404,'Booking not found');
@@ -828,7 +879,7 @@ api.post('/bookings/:id/payment/status',P,H(async req=>{
  return p
 }));
 function confirmBoarding(a,uid,reason){if(a.onboard_confirmed)return;db.transaction(()=>{run("update assignments set onboard_confirmed=1,onboard_confirmed_at=?,status='Boarded' where id=?",now(),a.id);setB(a.booking_id,'Boarded',uid,reason);
- if(a.payment_method=='cash'){const owed=q("select fee_kind,sum(amount_pesewas) amount from booking_fee_allocations where booking_id=? and payer_type in('rider','driver') group by fee_kind",a.booking_id),amounts=Object.fromEntries(owed.map(x=>[x.fee_kind,x.amount]));if((amounts.station||0)+(amounts.platform||0)+(amounts.loading||0)>0)run("insert or ignore into fee_receivables(booking_id,driver_id,station_id,station_pesewas,platform_pesewas,loading_pesewas,status,created_at,due_at) values(?,?,?,?,?,?, 'Open',?,?)",a.booking_id,a.driver_id,a.station_id||one('select origin_id from routes where id=?',a.route_id).origin_id,amounts.station||0,amounts.platform||0,amounts.loading||0,now(),new Date(Date.now()+cfg('fee_due_hours',a.route_id,24)*36e5).toISOString().slice(0,16))}
+ if(a.payment_method=='cash'){const owed=q("select fee_kind,sum(amount_pesewas) amount from booking_fee_allocations where booking_id=? and payer_type in('rider','driver') group by fee_kind",a.booking_id),amounts=Object.fromEntries(owed.map(x=>[x.fee_kind,x.amount]));if((amounts.station||0)+(amounts.platform||0)+(amounts.loading||0)>0){run("insert or ignore into fee_receivables(booking_id,driver_id,station_id,station_pesewas,platform_pesewas,loading_pesewas,status,created_at,due_at) values(?,?,?,?,?,?, 'Open',?,?)",a.booking_id,a.driver_id,a.station_id||one('select origin_id from routes where id=?',a.route_id).origin_id,amounts.station||0,amounts.platform||0,amounts.loading||0,now(),new Date(Date.now()+cfg('fee_due_hours',a.route_id,24)*36e5).toISOString().slice(0,16));const receivable=one('select id from fee_receivables where booking_id=?',a.booking_id);postCashFeeReceivable(receivable.id)}}
  notifyMgrs('Rider onboard',`Booking ${a.ref} confirmed onboard trip #${a.trip_id}.`,a.route_id)})()}
 api.post('/bookings/:id/board-confirm',P,H(async req=>{
  const a=one("select a.*,b.passenger_id,b.ref,b.route_id,b.payment_method,b.station_fee_pesewas,b.platform_fee_pesewas,b.driver_station_deduction_pesewas,b.driver_platform_deduction_pesewas,t.id trip_id,t.driver_id,t.status trip_status,t.departed_at from assignments a join bookings b on b.id=a.booking_id join trips t on t.id=a.trip_id where b.id=? and b.passenger_id=? and a.status in('Reserved','Confirmed','Boarded')",req.params.id,req.u.id);
@@ -874,7 +925,7 @@ async function releaseDriverPayout(bookingId,gate,retryFailed=false){
  }
  const payout=one('select * from driver_payouts where booking_id=?',bookingId);
  try{const result=await provider.initiatePayout({amount:ghs(amount),transCurrencyIso:'GHS',transactionId:payout.transaction_id,reference:row.ref,paypartnerCode:row.payout_partner,accountNoOrCardNoOrMSISDN:row.payout_msisdn,countryCode:provider.getDefaultCountryCode?.()||'GH0233',languageId:provider.getDefaultLanguage?.()||'en',callback:provider.getCallbackUrl?.()||''}),status=providerOutcome(result),responseStatus=String(result?.transactionstatus||result?.transactionStatus||result?.status||result?.data?.status||'').slice(0,40)||null;
-  db.transaction(()=>{run('update driver_payouts set status=?,response_status=?,updated_at=? where id=?',status,responseStatus,now(),payout.id);if(status=='Succeeded')ledgerDriverDeductions(row)})();
+  db.transaction(()=>{run('update driver_payouts set status=?,response_status=?,updated_at=? where id=?',status,responseStatus,now(),payout.id);if(status=='Succeeded'){ledgerDriverDeductions(row);postDriverPayout(payout.id)}})();
   if(status=='Failed')notifyMgrs('Payout attention',`Payout for booking ${row.ref} failed; review provider status.`,row.route_id);
   else notify(one('select driver_id from trips where id=?',row.trip_id).driver_id,'Payout update',`Payout for booking ${row.ref}: ${status}.`);
  }catch(e){run("update driver_payouts set status='NeedsReview',response_status='provider error',updated_at=? where id=?",now(),payout.id);
@@ -893,7 +944,7 @@ api.post('/manager/payouts/:id/status',mgr,H(async req=>{
  const p=one('select p.*,t.route_id from driver_payouts p join trips t on t.id=p.trip_id where p.id=?',req.params.id);if(!p)E(404,'Payout not found');inScope(req.u,p.route_id);
  if(!['Pending','NeedsReview'].includes(p.status))return p;const tenantId=one('select tenant_id from routes where id=?',p.route_id)?.tenant_id,result=await tenantPaymentProvider(tenantId).getTransactionStatus({transactionId:p.transaction_id}),status=providerOutcome(result),responseStatus=String(result?.transactionstatus||result?.transactionStatus||result?.status||result?.data?.status||'').slice(0,40)||null;
  const booking=one('select b.* from bookings b where b.id=?',p.booking_id);
- db.transaction(()=>{run('update driver_payouts set status=?,response_status=?,updated_at=? where id=?',status,responseStatus,now(),p.id);if(status=='Succeeded')ledgerDriverDeductions(booking)})();
+ db.transaction(()=>{run('update driver_payouts set status=?,response_status=?,updated_at=? where id=?',status,responseStatus,now(),p.id);if(status=='Succeeded'){ledgerDriverDeductions(booking);postDriverPayout(p.id)}})();
  return one('select * from driver_payouts where id=?',p.id)
 }));
 api.post('/manager/payouts/:id/retry',mgr,H(async req=>{
@@ -937,7 +988,7 @@ function refreshFeeReceivable(id){const b=feeReceivableBalances(id);if(!b)return
   const amount=one("select coalesce(sum(case when kind='waiver' then -amount_pesewas else amount_pesewas end),0) n from fee_allocations where receivable_id=? and fee_kind=?",id,kind).n,rec=one('select booking_id,station_id from fee_receivables where id=?',id);
   if(amount)run("insert or ignore into fee_ledger(booking_id,station_id,source,kind,amount_pesewas,created_at) values(?,?,'cash_settlement',?,?,?)",rec.booking_id,rec.station_id,kind,amount,now())
  }}
-function applyFeeAllocation({collectionId=null,receivableId,feeKind,amount,kind,reason=null,recordedBy=null,approvedBy=null}){run('insert into fee_allocations(collection_id,receivable_id,fee_kind,amount_pesewas,kind,reason,recorded_by,approved_by,created_at) values(?,?,?,?,?,?,?,?,?)',collectionId,receivableId,feeKind,amount,kind,reason,recordedBy,approvedBy,now());refreshFeeReceivable(receivableId)}
+function applyFeeAllocation({collectionId=null,receivableId,feeKind,amount,kind,reason=null,recordedBy=null,approvedBy=null}){const id=run('insert into fee_allocations(collection_id,receivable_id,fee_kind,amount_pesewas,kind,reason,recorded_by,approved_by,created_at) values(?,?,?,?,?,?,?,?,?)',collectionId,receivableId,feeKind,amount,kind,reason,recordedBy,approvedBy,now()).lastInsertRowid;refreshFeeReceivable(receivableId);if(kind!='collection')postFeeAdjustment(id)}
 function applyFeeCollectionResult(id,result){const c=one('select * from fee_collections where id=?',id);if(!c||!['Pending','NeedsReview'].includes(c.status))return c;
  const outcome=providerOutcome(result),statusText=String(result?.transactionstatus||result?.transactionStatus||result?.status||result?.data?.status||'').slice(0,40)||null;
  db.transaction(()=>{if(outcome=='Succeeded'){
@@ -949,6 +1000,7 @@ function applyFeeCollectionResult(id,result){const c=one('select * from fee_coll
     if(amount){applyFeeAllocation({collectionId:c.id,receivableId:r.id,feeKind:kind,amount,kind:'collection'});left-=amount}}
    if(!left)break
   }
+  postFeeCollection(c.id)
  }else run('update fee_collections set status=?,response_status=?,updated_at=? where id=?',outcome,statusText,now(),c.id)})();
  const updated=one('select * from fee_collections where id=?',id);if(updated.status=='NeedsReview')notifyMgrs('Fee due',`Fee collection ${updated.transaction_id} needs review.`,null,one('select station_id from drivers where user_id=?',updated.driver_id)?.station_id);return updated}
 api.get('/drivers/me/fees',DR,H(req=>{
@@ -1001,6 +1053,75 @@ api.get('/reports/fees',mgr,H(req=>{
  const[f,t]=rng(req),where=['l.created_at>=?','l.created_at<=?'],args=[f+'T00:00',t+'T99'];if(STATION_STAFF.includes(req.u.role)){if(req.u.organization_id){where.push('l.station_id in(select s.id from stations s join org_tenants ot on ot.tenant_id=s.tenant_id where ot.organization_id=?)');args.push(req.u.organization_id)}else if(req.u.tenant_id){where.push('l.station_id in(select id from stations where tenant_id=?)');args.push(req.u.tenant_id)}else{where.push('l.station_id=?');args.push(req.u.station_id||0)}}
  return rep(req,q(`select l.created_at,l.station_id,s.name station,b.ref,b.payment_method,l.source,l.kind,l.amount_pesewas from fee_ledger l join stations s on s.id=l.station_id join bookings b on b.id=l.booking_id where ${where.join(' and ')} order by l.created_at,l.id`,...args))
 }));
+function accountingRange(req){const to=String(req.query.to||new Date().toISOString().slice(0,10)),from=String(req.query.from||new Date(Date.now()-29*864e5).toISOString().slice(0,10));if(!validDate(from)||!validDate(to)||from>to)E(400,'Enter a valid accounting date range');return{from,to}}
+function accountingScope(req,fields){
+ if(req.u.role=='admin'){
+  const raw=String(req.query.tenantId||'');if(!raw||raw=='all')return{sql:'1=1',args:[]};if(raw=='platform')return{sql:`${fields.tenant} is null`,args:[]};
+  const tenantId=Number(raw);if(!Number.isSafeInteger(tenantId)||tenantId<1||!one('select 1 x from tenants where id=?',tenantId))E(400,'Choose a valid tenant scope');return{sql:`${fields.tenant}=?`,args:[tenantId]}
+ }
+ if(req.u.organization_id)return{sql:`${fields.organization}=?`,args:[req.u.organization_id]};
+ if(req.u.tenant_id)return{sql:`${fields.tenant}=?`,args:[req.u.tenant_id]};
+ if(req.u.station_id)return{sql:`${fields.station}=?`,args:[req.u.station_id]};
+ E(403,'Accounting access requires an assigned organization, tenant, or station')
+}
+const accountingRows=(req,format)=>{const{from,to}=accountingRange(req),scope=accountingScope(req,{tenant:'t.tenant_id',organization:'t.organization_id',station:'t.station_id'}),args=[from,to,...scope.args],where=`substr(t.effective_at,1,10) between ? and ? and ${scope.sql}`;
+ const journalLimit=req.query.format=='csv'?'':'limit 500',journal=q(`select t.id,t.effective_at,t.source_type,t.memo,t.reference,t.tenant_id,tn.name tenant,t.organization_id,o.name organization,t.station_id,s.name station,a.code account_code,a.name account,a.account_type,e.debit_pesewas,e.credit_pesewas
+  from ledger_transactions t join ledger_entries e on e.transaction_id=t.id join ledger_accounts a on a.id=e.account_id left join tenants tn on tn.id=t.tenant_id left join organizations o on o.id=t.organization_id left join stations s on s.id=t.station_id where ${where} order by t.effective_at desc,t.id desc,e.line_number ${journalLimit}`,...args);
+ const periodAccounts=q(`select a.code,a.name,a.account_type,sum(e.debit_pesewas) debits_pesewas,sum(e.credit_pesewas) credits_pesewas
+  from ledger_transactions t join ledger_entries e on e.transaction_id=t.id join ledger_accounts a on a.id=e.account_id where ${where} group by a.id order by a.code`,...args).map(row=>({...row,amount_pesewas:row.account_type=='revenue'?row.credits_pesewas-row.debits_pesewas:row.account_type=='expense'?row.debits_pesewas-row.credits_pesewas:0}));
+ const balanceScope=accountingScope(req,{tenant:'t.tenant_id',organization:'t.organization_id',station:'t.station_id'}),balances=q(`select a.code,a.name,a.account_type,coalesce(sum(e.debit_pesewas),0) debits_pesewas,coalesce(sum(e.credit_pesewas),0) credits_pesewas
+  from ledger_accounts a left join ledger_entries e on e.account_id=a.id and e.transaction_id in(select t.id from ledger_transactions t where substr(t.effective_at,1,10)<=? and ${balanceScope.sql}) where a.active=1 group by a.id order by a.code`,to,...balanceScope.args).map(row=>({...row,balance_pesewas:['asset','expense'].includes(row.account_type)?row.debits_pesewas-row.credits_pesewas:row.credits_pesewas-row.debits_pesewas}));
+ const sourceChecks=[
+  ['booking_payment',`select 'booking_payment' source_type,p.id source_id,p.transaction_id reference,p.amount_pesewas amount_pesewas,p.updated_at effective_at from booking_payments p join bookings b on b.id=p.booking_id join routes r on r.id=b.route_id`,'r'],
+  ['driver_payout',`select 'driver_payout' source_type,p.id source_id,p.transaction_id reference,p.amount_pesewas amount_pesewas,p.updated_at effective_at from driver_payouts p join bookings b on b.id=p.booking_id join routes r on r.id=b.route_id`,'r'],
+  ['fee_collection',`select 'fee_collection' source_type,c.id source_id,c.transaction_id reference,c.amount_pesewas amount_pesewas,c.updated_at effective_at from fee_collections c join drivers d on d.user_id=c.driver_id`,'d']
+ ];
+ const unposted=[];
+ for(const[type,sql,alias]of sourceChecks){const scoped=accountingScope(req,{tenant:`${alias}.tenant_id`,organization:`${alias}.organization_id`,station:alias=='r'?`${alias}.origin_id`:`${alias}.station_id`});const sourceTable=type=='booking_payment'?'booking_payments':type=='driver_payout'?'driver_payouts':'fee_collections',sourceAlias=type=='booking_payment'?'p':type=='driver_payout'?'p':'c';unposted.push(...q(`${sql} where ${sourceAlias}.status='Succeeded' and substr(${sourceAlias}.updated_at,1,10) between ? and ? and ${scoped.sql} and not exists(select 1 from ledger_transactions lt where lt.source_type=? and lt.source_id=cast(${sourceAlias}.id as text)) order by ${sourceAlias}.id limit 100`,from,to,...scoped.args,type).map(row=>({...row,amount_pesewas:row.amount_pesewas,source_table:sourceTable})))}
+ const cashScope=accountingScope(req,{tenant:'station.tenant_id',organization:'b.organization_id',station:'fr.station_id'}),cashUnposted=q(`select 'cash_fee_receivable' source_type,fr.id source_id,b.ref reference,fr.station_pesewas+fr.platform_pesewas+fr.loading_pesewas amount_pesewas,fr.created_at effective_at from fee_receivables fr join bookings b on b.id=fr.booking_id join stations station on station.id=fr.station_id where fr.station_pesewas+fr.platform_pesewas+fr.loading_pesewas>0 and substr(fr.created_at,1,10) between ? and ? and ${cashScope.sql} and not exists(select 1 from ledger_transactions lt where lt.source_type='cash_fee_receivable' and lt.source_id=cast(fr.id as text)) order by fr.id limit 100`,from,to,...cashScope.args);unposted.push(...cashUnposted.map(row=>({...row,source_table:'fee_receivables'})));
+ const adjustmentScope=accountingScope(req,{tenant:'station.tenant_id',organization:'b.organization_id',station:'fr.station_id'}),adjustmentUnposted=q(`select 'fee_adjustment' source_type,a.id source_id,b.ref reference,a.amount_pesewas,a.created_at effective_at from fee_allocations a join fee_receivables fr on fr.id=a.receivable_id join bookings b on b.id=fr.booking_id join stations station on station.id=fr.station_id where a.kind in('waiver','manual_settlement') and substr(a.created_at,1,10) between ? and ? and ${adjustmentScope.sql} and not exists(select 1 from ledger_transactions lt where lt.source_type='fee_adjustment' and lt.source_id=cast(a.id as text)) order by a.id limit 100`,from,to,...adjustmentScope.args);unposted.push(...adjustmentUnposted.map(row=>({...row,source_table:'fee_allocations'})));
+ const broken=q(`select t.id,t.source_type,t.source_id,sum(e.debit_pesewas) debits_pesewas,sum(e.credit_pesewas) credits_pesewas from ledger_transactions t join ledger_entries e on e.transaction_id=t.id where ${where} group by t.id having debits_pesewas!=credits_pesewas`,...args);
+ const income=periodAccounts.filter(row=>row.account_type=='revenue').reduce((sum,row)=>sum+row.amount_pesewas,0),expenses=periodAccounts.filter(row=>row.account_type=='expense').reduce((sum,row)=>sum+row.amount_pesewas,0);
+ return{from,to,journal,accounts:balances,periodAccounts,income_pesewas:income,expenses_pesewas:expenses,net_pesewas:income-expenses,reconciliation:{unposted,unposted_count:unposted.length,unbalanced_transactions:broken.length,unallocated_receipts_pesewas:balances.find(row=>row.code=='2990')?.balance_pesewas||0}}
+};
+api.get('/accounting/report',mgr,PERM('accounting.read','accountant'),H(req=>accountingRows(req)));
+api.get('/accounting/journal',mgr,PERM('accounting.read','accountant'),H(req=>rep(req,accountingRows(req).journal)));
+api.get('/accounting/income-expenses',mgr,PERM('accounting.read','accountant'),H(req=>rep(req,accountingRows(req).periodAccounts.filter(row=>['revenue','expense'].includes(row.account_type)))));
+api.get('/accounting/reconciliation',mgr,PERM('accounting.read','accountant'),H(req=>accountingRows(req).reconciliation));
+api.post('/accounting/expenses',mgr,PERM('accounting.expense','accountant'),H(req=>{
+ const date=String(req.body.date||''),category=String(req.body.category||'').trim(),description=String(req.body.description||'').trim(),reference=String(req.body.reference||'').trim(),raw=String(req.body.amountGhs??'');
+ if(!validDate(date)||!category||category.length>80||!description||description.length>240||reference.length>100||!/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(raw))E(400,'Enter a valid date, category, description, amount and optional reference');
+ const amount=toPesewas(raw);if(amount<=0||!Number.isSafeInteger(amount))E(400,'Expense amount must be positive and within the supported range');
+ let tenantId=null,organizationId=null,stationId=null;
+ if(req.u.role=='admin'){
+  tenantId=Number(req.body.tenantId)||null;if(tenantId&&!one('select 1 x from tenants where id=?',tenantId))E(400,'Choose a valid tenant');
+  organizationId=Number(req.body.organizationId)||null;if(organizationId&&(!tenantId||!one('select 1 x from org_tenants where organization_id=? and tenant_id=?',organizationId,tenantId)))E(400,'Choose an organization connected to the selected tenant');
+  stationId=Number(req.body.stationId)||null;if(stationId&&tenantForStation(stationId)!=tenantId)E(400,'Choose a station in the selected tenant')
+ }else{
+  tenantId=req.u.tenant_id||tenantForStation(req.u.station_id);organizationId=req.u.organization_id||null;stationId=req.u.station_id||null;
+  if(organizationId&&tenantId&&!one('select 1 x from org_tenants where organization_id=? and tenant_id=?',organizationId,tenantId))E(403,'Expense scope is outside your organization')
+ }
+ const id=cr.randomBytes(16).toString('hex'),transactionId=postLedgerTransaction({sourceType:'manual_expense',sourceId:id,tenantId,organizationId,stationId,effectiveAt:`${date}T12:00:00.000Z`,memo:`${category}: ${description}`,reference:reference||null,createdBy:req.u.id,lines:[{account:'6200',debit:amount,credit:0},{account:'1010',debit:0,credit:amount}]});
+ audit(req.u.id,'accounting.expense.record','ledger_transaction',transactionId,{category,amountPesewas:amount,tenantId,organizationId,stationId,reference});return{id:transactionId}
+}));
+api.post('/accounting/expenses/:id/reverse',mgr,PERM('accounting.expense','accountant'),H(req=>{
+ const id=Number(req.params.id),reason=String(req.body.reason||'').trim(),date=String(req.body.date||new Date().toISOString().slice(0,10));if(!Number.isSafeInteger(id)||id<1||!reason||reason.length>240||!validDate(date))E(400,'Enter a valid reversal date and reason');
+ const scope=accountingScope(req,{tenant:'t.tenant_id',organization:'t.organization_id',station:'t.station_id'}),original=one(`select t.* from ledger_transactions t where t.id=? and t.source_type='manual_expense' and ${scope.sql}`,id,...scope.args);if(!original)E(404,'Manual expense not found in your accounting scope');
+ if(one("select 1 x from ledger_transactions where source_type='manual_expense_reversal' and source_id=?",String(id)))E(409,'This expense has already been reversed');
+ const lines=q('select a.code,e.debit_pesewas,e.credit_pesewas from ledger_entries e join ledger_accounts a on a.id=e.account_id where e.transaction_id=? order by e.line_number',id).map(line=>({account:line.code,debit:line.credit_pesewas,credit:line.debit_pesewas}));
+ const reversalId=postLedgerTransaction({sourceType:'manual_expense_reversal',sourceId:id,tenantId:original.tenant_id,organizationId:original.organization_id,stationId:original.station_id,effectiveAt:`${date}T12:00:00.000Z`,memo:`Expense reversal: ${reason}`,reference:original.reference,createdBy:req.u.id,lines});audit(req.u.id,'accounting.expense.reverse','ledger_transaction',reversalId,{originalId:id,reason});return{id:reversalId}
+}));
+api.get('/reports/accounting-journal',mgr,PERM('accounting.read','accountant'),H(req=>rep(req,accountingRows(req).journal)));
+api.get('/reports/accounting-income-expenses',mgr,PERM('accounting.read','accountant'),H(req=>rep(req,accountingRows(req).periodAccounts.filter(row=>['revenue','expense'].includes(row.account_type)))));
+api.get('/reports/accounting-reconciliation',mgr,PERM('accounting.read','accountant'),H(req=>rep(req,accountingRows(req).reconciliation.unposted)));
+function backfillAccountingLedger(){
+ q("select id from booking_payments where status='Succeeded' order by id").forEach(row=>postBookingCollection(row.id));
+ q("select id from driver_payouts where status='Succeeded' order by id").forEach(row=>postDriverPayout(row.id));
+ q("select id from fee_collections where status='Succeeded' order by id").forEach(row=>postFeeCollection(row.id));
+ q('select id from fee_receivables where station_pesewas+platform_pesewas+loading_pesewas>0 order by id').forEach(row=>postCashFeeReceivable(row.id));
+ q("select id from fee_allocations where kind in('waiver','manual_settlement') order by id").forEach(row=>postFeeAdjustment(row.id))
+}
+backfillAccountingLedger();
 app.use('/api/v1',api);
 const bk=require('./backup'),BK=path.resolve(process.env.BACKUP_DIR||'backups'),backup=()=>bk.backup(db,BK,+process.env.BACKUP_KEEP||28);
 if(require.main===module){setInterval(()=>{try{jobs();lastJob=Date.now()}catch(e){console.error(e)}},+process.env.JOB_MS||10000);
