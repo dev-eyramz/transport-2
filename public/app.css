@@ -35,14 +35,21 @@ body {
 .transport-shell {
   width: min(100%, 1440px);
   max-width: none;
+  display: flex;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  flex-direction: column;
   margin: 0 auto;
   padding: 28px clamp(16px, 4vw, 56px) 48px;
+  overflow: hidden;
 }
 
 .app-header.active {
-  position: sticky;
-  top: 12px;
+  position: relative;
+  top: auto;
   z-index: 20;
+  flex: 0 0 auto;
   min-height: 76px;
   margin-bottom: 24px;
   padding: 12px 18px;
@@ -101,10 +108,18 @@ body {
 
 #app {
   display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: start;
   gap: 20px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
+
+#off { flex: 0 0 auto; }
 
 #app.auth-view {
   display: block;
@@ -2248,6 +2263,64 @@ summary {
   font-size: .8rem;
 }
 
+.document-upload-preview {
+  display: grid;
+  gap: .6rem;
+  margin-top: .65rem;
+  padding: .75rem;
+  border: 1px solid var(--border, #d6deea);
+  border-radius: .75rem;
+  background: var(--surface-muted, #f7f9fc);
+}
+
+.document-upload-preview[hidden] {
+  display: none;
+}
+
+.document-preview-details {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: .25rem .75rem;
+  color: var(--text-muted, #566579);
+  font-size: .82rem;
+}
+
+.document-preview-details strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text, #182536);
+}
+
+.document-preview-frame {
+  display: block;
+  width: 100%;
+  height: min(60vh, 480px);
+  border: 1px solid var(--border, #d6deea);
+  border-radius: .5rem;
+  background: #fff;
+}
+
+.document-preview-image {
+  display: block;
+  max-width: 100%;
+  max-height: 480px;
+  margin-inline: auto;
+  border-radius: .5rem;
+  object-fit: contain;
+}
+
+.document-preview-note {
+  margin: 0;
+  color: var(--text-muted, #566579);
+  font-size: .85rem;
+}
+
+.document-preview-open {
+  justify-self: start;
+  font-size: .85rem;
+}
+
 .app-dialog-form .form-control,
 .app-dialog-form .form-select {
   min-height: 46px;
@@ -2534,6 +2607,29 @@ summary {
 :root[data-theme="dark"] .status-danger { border-color: #714141; background: #382323; color: #f0b4b4; }
 :root[data-theme="dark"] .landing-card p,
 :root[data-theme="dark"] .card-body { color: var(--text); }
+:root[data-theme="dark"] :is(.card-header, .portal-dashboard .card-header, .app-dialog-form, .app-toast, .passenger-navigation, .recurring-options, .day-option span, .auth-card, .auth-tabs, .auth-tab.active, .role-context-bar .role-chip, .role-lock, .otp-box, .driver-onboarding-fields, .driver-onboarding-fields fieldset, .fare-quote, .ride-availability, .fare-setting, .document-upload-preview, .document-preview-frame, .empty-state, .access-footer, .workspace-role, .workspace-scope, .app-header-context time, .invitation-qr, .btn-secondary, .btn-outline-secondary) { background-color: var(--panel); color: var(--text); border-color: var(--card-border); }
+:root[data-theme="dark"] :is(.table thead th, .table tbody tr:hover td) { background-color: var(--panel-alt); color: var(--text); }
+:root[data-theme="dark"] :is(.app-toast-content strong, .app-toast-content p, .app-toast-close, .app-dialog-title, .app-dialog-description, .app-dialog-field > label, .app-dialog-field small, .document-preview-details, .document-preview-note) { color: var(--text); }
+:root[data-theme="dark"] .app-dialog-field :is(input:not([type="checkbox"]), select) { border-color: var(--input-border); background: var(--input-bg); color: var(--text); }
+:root[data-theme="dark"] .auth-form :is(.form-control, .form-select):focus { background-color: var(--input-bg); color: var(--text); }
+:root[data-theme="dark"] :is(.btn-primary, .btn-primary:hover, .btn-primary:focus, .btn-primary:active) { border-color: #087f8c; background: #087f8c; color: #fff; }
+:root[data-theme="dark"] .btn-primary:hover { border-color: #066b75; background: #066b75; }
+:root[data-theme="dark"] :is(.btn-secondary, .btn-outline-secondary):hover { background: var(--panel-strong); color: var(--text); }
+:root[data-theme="dark"] :is(.btn-warning, .btn-warning:hover, .btn-danger, .btn-danger:hover) { border-color: #705a30; background: #30291b; color: #f0dcae; }
+:root[data-theme="dark"] :is(.btn-danger, .btn-danger:hover) { border-color: #714141; background: #382323; color: #f0b4b4; }
+:root[data-theme="dark"] :is(.app-toast-icon, .app-toast-info .app-toast-icon) { background: #19372c; color: #a4e5c4; }
+:root[data-theme="dark"] :is(.app-brand-mark, .empty-state-mark, .landing-card .badge, .role-lock) { border-color: #28614c; background: #19372c; color: #a4e5c4; }
+:root[data-theme="dark"] .app-toast-error .app-toast-icon { background: #382323; color: #f0b4b4; }
+:root[data-theme="dark"] .app-toast-warning .app-toast-icon { background: #30291b; color: #f0dcae; }
+:root[data-theme="dark"] .app-dialog-error,
+:root[data-theme="dark"] .booking-validation,
+:root[data-theme="dark"] .network-status { border-color: #714141; background: #382323; color: #f0b4b4; }
+:root[data-theme="dark"] .portal-stat.needs-attention { border-color: #705a30; background: #30291b; }
+:root[data-theme="dark"] .portal-stat.needs-attention strong { color: #f0dcae; }
+:root[data-theme="dark"] .day-option input:checked + span { border-color: var(--primary); background: #193b40; color: #b7f1ed; }
+:root[data-theme="dark"] .status-indicator { background: #f1bd57; }
+:root[data-theme="dark"] .status-indicator.is-ready { background: #4cc795; }
+:root[data-theme="dark"] .app-header .theme-control .form-select { color-scheme: dark; }
 
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] .app-header.active,
@@ -2566,4 +2662,27 @@ summary {
   :root[data-theme="system"] .status-danger { border-color: #714141; background: #382323; color: #f0b4b4; }
   :root[data-theme="system"] .landing-card p,
   :root[data-theme="system"] .card-body { color: var(--text); }
+  :root[data-theme="system"] :is(.card-header, .portal-dashboard .card-header, .app-dialog-form, .app-toast, .passenger-navigation, .recurring-options, .day-option span, .auth-card, .auth-tabs, .auth-tab.active, .role-context-bar .role-chip, .role-lock, .otp-box, .driver-onboarding-fields, .driver-onboarding-fields fieldset, .fare-quote, .ride-availability, .fare-setting, .document-upload-preview, .document-preview-frame, .empty-state, .access-footer, .workspace-role, .workspace-scope, .app-header-context time, .invitation-qr, .btn-secondary, .btn-outline-secondary) { background-color: var(--panel); color: var(--text); border-color: var(--card-border); }
+  :root[data-theme="system"] :is(.table thead th, .table tbody tr:hover td) { background-color: var(--panel-alt); color: var(--text); }
+  :root[data-theme="system"] :is(.app-toast-content strong, .app-toast-content p, .app-toast-close, .app-dialog-title, .app-dialog-description, .app-dialog-field > label, .app-dialog-field small, .document-preview-details, .document-preview-note) { color: var(--text); }
+  :root[data-theme="system"] .app-dialog-field :is(input:not([type="checkbox"]), select) { border-color: var(--input-border); background: var(--input-bg); color: var(--text); }
+  :root[data-theme="system"] .auth-form :is(.form-control, .form-select):focus { background-color: var(--input-bg); color: var(--text); }
+  :root[data-theme="system"] :is(.btn-primary, .btn-primary:hover, .btn-primary:focus, .btn-primary:active) { border-color: #087f8c; background: #087f8c; color: #fff; }
+  :root[data-theme="system"] .btn-primary:hover { border-color: #066b75; background: #066b75; }
+  :root[data-theme="system"] :is(.btn-secondary, .btn-outline-secondary):hover { background: var(--panel-strong); color: var(--text); }
+  :root[data-theme="system"] :is(.btn-warning, .btn-warning:hover, .btn-danger, .btn-danger:hover) { border-color: #705a30; background: #30291b; color: #f0dcae; }
+  :root[data-theme="system"] :is(.btn-danger, .btn-danger:hover) { border-color: #714141; background: #382323; color: #f0b4b4; }
+  :root[data-theme="system"] :is(.app-toast-icon, .app-toast-info .app-toast-icon) { background: #19372c; color: #a4e5c4; }
+  :root[data-theme="system"] :is(.app-brand-mark, .empty-state-mark, .landing-card .badge, .role-lock) { border-color: #28614c; background: #19372c; color: #a4e5c4; }
+  :root[data-theme="system"] .app-toast-error .app-toast-icon { background: #382323; color: #f0b4b4; }
+  :root[data-theme="system"] .app-toast-warning .app-toast-icon { background: #30291b; color: #f0dcae; }
+  :root[data-theme="system"] .app-dialog-error,
+  :root[data-theme="system"] .booking-validation,
+  :root[data-theme="system"] .network-status { border-color: #714141; background: #382323; color: #f0b4b4; }
+  :root[data-theme="system"] .portal-stat.needs-attention { border-color: #705a30; background: #30291b; }
+  :root[data-theme="system"] .portal-stat.needs-attention strong { color: #f0dcae; }
+  :root[data-theme="system"] .day-option input:checked + span { border-color: var(--primary); background: #193b40; color: #b7f1ed; }
+  :root[data-theme="system"] .status-indicator { background: #f1bd57; }
+  :root[data-theme="system"] .status-indicator.is-ready { background: #4cc795; }
+  :root[data-theme="system"] .app-header .theme-control .form-select { color-scheme: dark; }
 }

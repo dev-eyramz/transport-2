@@ -172,7 +172,7 @@ function surge(){const today=new Date().toISOString().slice(0,10);return q(`sele
 // ---- http ----
 const app=express(),compression=require('compression');app.set('trust proxy',+process.env.TRUST_PROXY||0);app.disable('x-powered-by');
 app.use(compression({filter:(rq,rs)=>!rq.path.endsWith('/events')&&compression.filter(rq,rs)}));
-app.use((rq,res,n)=>{res.set({'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"});if(PROD)res.set('Strict-Transport-Security','max-age=31536000');n()});
+app.use((rq,res,n)=>{res.set({'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"});if(PROD)res.set('Strict-Transport-Security','max-age=31536000');n()});
 function sanitizeRequestInput(value,key='input'){
  if(typeof value=='string'){
   const field=key.toLowerCase();
