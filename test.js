@@ -206,6 +206,7 @@ assert.equal((await call('/auth/verify-otp','POST',{phone:'0249000004',code:capt
 assert.equal((await call('/me','GET',null,Recovery.token)).s,401,'successful PIN reset revokes existing sessions');
 assert.equal((await call('/auth/login','POST',{phone:'0249000004',pin:'654321'})).s,401,'old PIN is invalid after recovery');
 assert.equal((await call('/auth/login','POST',{phone:'0249000004',pin:'123456'})).s,200,'new PIN works after recovery');
+const idleSession=await login('0249000011','Idle Session','passenger'),idleSessionMe=await call('/me','GET',null,idleSession.token);assert.ok(idleSessionMe.j.expiresAt>Date.now(),'session reports its absolute expiry');assert.ok(idleSessionMe.j.lastActivityAt>Date.now()-5000,'session exposes its latest activity time');assert.equal((await call('/auth/activity','POST',{},idleSession.token)).s,200,'authenticated user activity extends the idle window');db.prepare('update sessions set last_activity=? where user_id=?').run(Date.now()-120001,idleSessionMe.j.id);assert.equal((await call('/me','GET',null,idleSession.token)).s,401,'sessions idle for two minutes are rejected');
 const lo=await login('0242222222');assert.equal((await call('/me','GET',null,lo.token)).s,200);await call('/auth/logout','POST',{},lo.token);assert.equal((await call('/me','GET',null,lo.token)).s,401,'logout revokes token');
 assert.equal((await call('/me','GET',null,'garbage')).s,401);assert.equal((await call('/me','GET',null,M)).j.pin_hash,undefined,'no hash leak');
 // --- outbox retry + delivery status ---
