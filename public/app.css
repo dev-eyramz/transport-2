@@ -2334,22 +2334,112 @@ summary {
   align-items: start;
 }
 
-.manager-sections {
-  display: block;
-  columns: 2;
-  column-gap: 12px;
+.portal-dashboard.manager-dashboard {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
 }
 
-.manager-sections > .card {
-  display: block;
+.manager-dashboard > .manager-hero,
+.manager-dashboard > .portal-metrics,
+.manager-dashboard > .workspace-section-nav {
+  flex: 0 0 auto;
+}
+
+.manager-sections {
+  display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  overflow: hidden;
+}
+
+.manager-column {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: #cbd7e1 transparent;
+  scrollbar-width: thin;
+}
+
+.manager-column > .card {
   width: 100%;
-  margin: 0 0 12px;
-  break-inside: avoid;
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.access-rights-group {
+  margin: 16px 0 0;
+  padding: 14px;
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  background: var(--panel-alt);
+}
+
+.access-rights-group legend {
+  float: none;
+  width: auto;
+  margin: 0 0 10px;
+  color: var(--text);
+  font-size: .9rem;
+  font-weight: 750;
+}
+
+.access-rights-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.access-right-option {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--card-border);
+  border-radius: 9px;
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.access-right-option input {
+  flex: 0 0 auto;
+  margin-top: 3px;
+  accent-color: var(--primary);
+}
+
+.access-right-option span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.access-right-option strong {
+  font-size: .82rem;
+  font-weight: 650;
+}
+
+.access-right-option small {
+  color: var(--muted);
+  font-size: .72rem;
 }
 
 @media (max-width: 860px) {
   .manager-sections {
-    columns: 1;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .access-rights-list {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
