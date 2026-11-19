@@ -156,10 +156,65 @@ body {
   text-align: center;
 }
 
+.terms-theme {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 650;
+}
+
+.terms-theme select {
+  padding: 7px 26px 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #101820;
+  --surface: #18232c;
+  --line: #344651;
+  --text: #e7eef3;
+  --muted: #a0b1bf;
+  --teal: #4dc3c1;
+  --teal-strong: #70d8d1;
+}
+
+:root[data-theme="dark"] body { background: var(--page); }
+:root[data-theme="dark"] .terms-document { box-shadow: 0 12px 34px rgba(0,0,0,.24); }
+:root[data-theme="dark"] .terms-document p:not(.terms-lead):not(.draft-warning) { color: #c1cdd6; }
+:root[data-theme="dark"] .draft-warning { border-color: #705a30; background: #30291b; color: #f0dcae; }
+:root[data-theme="dark"] .terms-document code { border-color: var(--line); background: #202d37; color: #d1dce4; }
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    color-scheme: dark;
+    --page: #101820;
+    --surface: #18232c;
+    --line: #344651;
+    --text: #e7eef3;
+    --muted: #a0b1bf;
+    --teal: #4dc3c1;
+    --teal-strong: #70d8d1;
+  }
+  :root[data-theme="system"] body { background: var(--page); }
+  :root[data-theme="system"] .terms-document { box-shadow: 0 12px 34px rgba(0,0,0,.24); }
+  :root[data-theme="system"] .terms-document p:not(.terms-lead):not(.draft-warning) { color: #c1cdd6; }
+  :root[data-theme="system"] .draft-warning { border-color: #705a30; background: #30291b; color: #f0dcae; }
+  :root[data-theme="system"] .terms-document code { border-color: var(--line); background: #202d37; color: #d1dce4; }
+}
+
 @media (max-width: 560px) {
   body { font-size: 15px; }
   .terms-shell { width: min(100% - 24px, 920px); padding-top: 12px; }
   .terms-header { min-height: 50px; margin-bottom: 12px; }
+  .terms-theme { gap: 0; }
+  .terms-theme > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
   .terms-brand { font-size: .8rem; }
   .terms-brand-mark { width: 34px; height: 34px; }
   .terms-back { font-size: .78rem; }
