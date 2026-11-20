@@ -1,10 +1,10 @@
-# Community Transport Reservation & Dispatch (Node + Express + SQLite)
+# Community Transport Reservation & Dispatch (Node + Express)
 Run: configure `APP_SECRET`, `SEED_ADMIN_PHONE`, and `SEED_ADMIN_PIN` in the environment, then `npm install && npm start` → http://localhost:3000 · Test: `npm test`
 No demo accounts, stations, or routes are created for fresh databases. Existing databases retain their data, so review and rotate any legacy demo users manually. On a fresh database, set `SEED_ADMIN_PHONE` and a unique `SEED_ADMIN_PIN` (6+ characters) to provision the initial admin. Set `APP_SECRET` to a unique random value of at least 32 characters in every environment; the app does not use a built-in secret fallback. Create station-scoped managers through the admin workflow.
-Env: PORT, DB, CUTOFF_MIN(30), TRIP_MIN(60), SURGE_SEATS(4), SURGE_WAIT(30), JOB_MS(10000).
+Env: PORT, DB, DB_BACKEND (`sqlite` by default; optional `postgres`), DATABASE_URL, POSTGRES_SCHEMA, CUTOFF_MIN(30), TRIP_MIN(60), SURGE_SEATS(4), SURGE_WAIT(30), JOB_MS(10000).
 Implements v1.1 policies: manager-controlled driver availability, mandatory weekly recurring confirmation (idempotent), automatic fair allocation + logged manager override, transactional capacity control, breakdown requeue, surge alerts, outbox notifications, audit log, station scoping.
 Architecture: server.js modules = auth, bookings, recurring, fleet, dispatch, manager, admin; SQLite constraints (unique refs/occurrences, partial unique index = one active assignment per booking, CHECKs). Frontend: public/index.html (vanilla, Bootstrap CDN, mobile first).
-Not included: SignalR-style push (UI polls every 20s), password login, DB backups (copy transport.db).
+Not included: SignalR-style push (UI polls every 20s), password login.
 
 ## v1.2 additions
 - PATCH `/bookings/:id` (re-queues and reallocates; assigned seats are released), PATCH `/recurring/:id` (applies to unconfirmed weeks only), manager `POST /manager/bookings/:id/no-show` (before departure).
@@ -24,6 +24,26 @@ Not included: SignalR-style push (UI polls every 20s), password login, DB backup
 - **Data:** versioned `migrations/*.sql` (existing DBs are adopted automatically). Verified online backups every `BACKUP_EVERY_H` hours (keeps `BACKUP_KEEP`), `npm run backup`, `npm run restore -- <file>` (stop the app first; also back up `/data/uploads` and copy backups off-server). SQLite is single-node; move to Postgres only if you outgrow one server.
 - **Live + offline:** Server-Sent Events replace polling (60 s fallback); PWA manifest + service worker cache the app shell and last-seen data (cleared on logout).
 - Limits are in-memory (single process). Run one instance.
+
+## PostgreSQL backend and one-time SQLite copy
+
+SQLite remains the default and is unchanged unless `DB_BACKEND=postgres` is explicitly selected. PostgreSQL uses `DATABASE_URL` and an optional `POSTGRES_SCHEMA` (default `public`). Remote PostgreSQL connections in production must explicitly use TLS (`sslmode=require` or stricter). The selected PostgreSQL schema is created if needed, and the app initializes its current schema on an empty target. A schema-version mismatch fails startup rather than silently using an incompatible schema.
+
+To copy a SQLite database without modifying its source, point `DATABASE_URL` at a **new, empty** PostgreSQL database/schema and run:
+
+```sh
+DATABASE_URL='postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require' \
+POSTGRES_SCHEMA=transport \
+npm run db:copy:postgres -- --source /path/to/transport.db
+```
+
+The copy tool snapshots the SQLite file read-only, applies SQLite migrations to the temporary snapshot, imports all rows into PostgreSQL in a transaction, defers and verifies foreign keys, checks row counts, and resets generated-ID sequences. It refuses to merge into tables containing application data. Stop writes to the source before the final copy; writes made after its snapshot will not be present in PostgreSQL.
+
+After verifying the copy, select PostgreSQL in the app environment with `DB_BACKEND=postgres`, `DATABASE_URL`, and `POSTGRES_SCHEMA`, then restart. The app uses **one database at a time**: there is no continuous replication, dual-write, automatic failover, or automatic reverse-copy. Switching back to SQLite after PostgreSQL has accepted writes would discard those newer writes unless you perform a separate migration.
+
+PostgreSQL backups use `pg_dump` custom archives and are verified with `pg_restore --list`. The `restore` CLI remains SQLite-only; use your database host's recovery features or a deliberate, verified `pg_restore` procedure for PostgreSQL.
+
+**Performance note:** PostgreSQL currently uses the synchronous `pg-native` interface to preserve the app's synchronous SQLite query model. Each database round trip blocks that Node.js process until the remote PostgreSQL host responds. This backend is functionally tested, but measure latency and load in a staging environment before production cutover; a high-latency remote host can delay requests.
 
 ## v1.4
 - Admin screens: create station manager, set any user's PIN; staff change their own PIN (`/me/pin`).

@@ -4,9 +4,16 @@ const { createPaymentProvider, normalizeMsisdn, isSupportedPayPartner } = requir
 const { riderCharges, driverDeductions, percentageCharge, totalDue } = require('./fees');
 const PROD=process.env.NODE_ENV=='production',gw=require('./gateway'),SECRET=process.env.APP_SECRET;
 if(!SECRET||SECRET.length<32)throw new Error('APP_SECRET must be set to a random value of at least 32 characters');
-const db=new D(process.env.DB||'transport.db');db.pragma('journal_mode=WAL');db.pragma('synchronous=FULL');db.pragma('busy_timeout=5000');db.pragma('foreign_keys=ON');
+const DB_BACKEND=String(process.env.DB_BACKEND||'sqlite').toLowerCase();
+let db;
+if(DB_BACKEND==='sqlite'){
+ db=new D(process.env.DB||'transport.db');db.pragma('journal_mode=WAL');db.pragma('synchronous=FULL');db.pragma('busy_timeout=5000');db.pragma('foreign_keys=ON');
+}else if(DB_BACKEND==='postgres'){
+ const{PostgresDatabase,ensureSchema}=require('./postgres');
+ db=new PostgresDatabase(process.env.DATABASE_URL,{schema:process.env.POSTGRES_SCHEMA||'public'});ensureSchema(db)
+}else throw new Error('DB_BACKEND must be either sqlite or postgres');
 const DUR=+process.env.TRIP_MIN||60,CUTOFF=+process.env.CUTOFF_MIN||30,SURGE_SEATS=+process.env.SURGE_SEATS||4,SURGE_WAIT=+process.env.SURGE_WAIT||30,SESSION_IDLE_TIMEOUT_MS=2*60*1000;
-require('./migrate')(db);
+if(DB_BACKEND==='sqlite')require('./migrate')(db);
 const q=(s,...a)=>db.prepare(s).all(...a),one=(s,...a)=>db.prepare(s).get(...a),run=(s,...a)=>db.prepare(s).run(...a);
 const TENANT_SETTING_KEYS=[
  'PAYMENT_PROVIDER','EGANOW_BASE_URL','EGANOW_API_USERNAME','EGANOW_API_PASSWORD','EGANOW_X_AUTH','EGANOW_CALLBACK_URL',
@@ -79,7 +86,7 @@ function snapshotBookingFees(booking,route,entryType='charge'){
  }
 }
 function reverseBookingFees(booking){q(`select organization_id,origin_tenant_id,fee_kind,stream,payer_type,payer_id,recipient_type,recipient_id,payer_percentage,sum(amount_pesewas) amount
- from booking_fee_allocations where booking_id=? group by organization_id,origin_tenant_id,fee_kind,stream,payer_type,payer_id,recipient_type,recipient_id,payer_percentage having amount<>0`,booking.id).forEach(row=>run('insert into booking_fee_allocations(booking_id,organization_id,origin_tenant_id,fee_kind,stream,payer_type,payer_id,recipient_type,recipient_id,amount_pesewas,payer_percentage,entry_type,created_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',booking.id,row.organization_id,row.origin_tenant_id,row.fee_kind,row.stream,row.payer_type,row.payer_id,row.recipient_type,row.recipient_id,-row.amount,row.payer_percentage,'reversal',now()))}
+ from booking_fee_allocations where booking_id=? group by organization_id,origin_tenant_id,fee_kind,stream,payer_type,payer_id,recipient_type,recipient_id,payer_percentage having sum(amount_pesewas)<>0`,booking.id).forEach(row=>run('insert into booking_fee_allocations(booking_id,organization_id,origin_tenant_id,fee_kind,stream,payer_type,payer_id,recipient_type,recipient_id,amount_pesewas,payer_percentage,entry_type,created_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',booking.id,row.organization_id,row.origin_tenant_id,row.fee_kind,row.stream,row.payer_type,row.payer_id,row.recipient_type,row.recipient_id,-row.amount,row.payer_percentage,'reversal',now()))}
 const ledgerAccountCodes={platform:'4000',tenant:'4100',organization:'4200'},ledgerAccountId=code=>{const account=one('select id from ledger_accounts where code=? and active=1',code);if(!account)throw new Error(`Accounting account ${code} is unavailable`);return account.id};
 function postLedgerTransaction({sourceType,sourceId,tenantId=null,organizationId=null,stationId=null,effectiveAt=now(),memo,reference=null,createdBy=null,lines}){
  const entries=lines.filter(line=>line.debit||line.credit);
@@ -214,7 +221,7 @@ function jobs(){const w=nextMonday();q("select * from recurring where status='Ac
  const s=surge();s.filter(x=>x.alert).forEach(x=>{const m=`Surge on ${x.route}, ${x.date}: ${x.queuedSeats} seats waiting, oldest ${x.oldestWaitMin} min.`;
   if(!one('select 1 x from notifications where msg=? and at>?',m,new Date(Date.now()-36e5).toISOString().slice(0,16)))notifyMgrs('Surge',m,x.route_id)});
  reminders();outbox().catch(console.error)}
-function surge(){const today=new Date().toISOString().slice(0,10);return q(`select b.route_id,b.date,sum(b.seats) seats,min(b.created) oldest,min(b.arrival) first,r.name from bookings b join routes r on r.id=b.route_id where b.status='Queued' and b.payment_status in${DISPATCHABLE_SQL} group by b.route_id,b.date`).map(g=>{
+function surge(){const today=new Date().toISOString().slice(0,10);return q(`select b.route_id,b.date,sum(b.seats) seats,min(b.created) oldest,min(b.arrival) first,r.name from bookings b join routes r on r.id=b.route_id where b.status='Queued' and b.payment_status in${DISPATCHABLE_SQL} group by b.route_id,b.date,r.name`).map(g=>{
  const wait=Math.round((Date.now()-new Date(g.oldest+'Z'))/6e4),dow=new Date(g.date+'T00:00:00').getDay(),dep=Math.min(mins(g.first)+15,1439);
  const free=q("select id from trips where route_id=? and substr(dep_at,1,10)=? and status in('Planned','Loading') and exclusive_for is null",g.route_id,g.date).reduce((s,t)=>s+freeSeats(t.id),0);
  const ret=g.date!=today?[]:q("select v.* from vehicles v join drivers d on d.user_id=v.driver_id where v.status in('Returning','OnRound') and v.docs_ok=1 and d.verified=1 and d.op_status in('Returning','OnTrip') and d.station_id=(select origin_id from routes where id=?) and d.tenant_id=(select tenant_id from routes where id=?)",g.route_id,g.route_id).filter(v=>q('select 1 x from availability where driver_id=? and dow=? and st<=? and en>=?',v.driver_id,dow,hhmm(dep),hhmm(dep+DUR)).length);
@@ -309,7 +316,7 @@ api.post('/auth/request-otp',H(async req=>{const phone=normalizePhone(req.body.p
  const code=String(100000+cr.randomInt(900000));run('delete from otps where phone=?',phone);run('insert into otps(phone,code,exp,purpose) values(?,?,?,?)',phone,sha(phone+code),Date.now()+3e5,purpose);
  const msg=`Your transport code is ${code}. Valid 5 minutes. Do not share it.`;try{await gw.sms(phone,msg,{config:messaging,tenantId})}catch(e){try{await gw.sms(phone,msg,{config:messaging,tenantId})}catch(e2){console.error('OTP send failed',e2.message);alertOps('otp','OTP SMS failing: '+e2.message);E(502,'Could not send SMS, try again')}}
  return{ok:1}}));
-api.post('/auth/login',SH(req=>{const phone=normalizePhone(req.body.phone),pin=String(req.body.pin||''),portal=String(req.body.portal||'');limit('login:'+req.ip,30,36e5);if(!phone||!pin)E(401,'Invalid phone or PIN');const u=one('select * from users where phone=?',phone);if(!u||u.deleted_at||!u.pin_hash)E(401,'Invalid phone or PIN');if(u.locked_until>Date.now())E(423,'Account locked, try again later');if(!okPin(pin,u.pin_hash)){run('update users set pin_fails=pin_fails+1,locked_until=case when pin_fails+1>=5 then ? else 0 end where id=?',Date.now()+9e5,u.id);audit(u.id,'auth.fail','user',u.id);E(401,'Invalid phone or PIN')}
+api.post('/auth/login',SH(req=>{const phone=normalizePhone(req.body.phone),pin=String(req.body.pin||''),portal=String(req.body.portal||'');limit('login:'+req.ip,30,36e5);if(!phone||!pin)E(401,'Invalid phone or PIN');const u=one('select * from users where phone=?',phone);if(!u||u.deleted_at||!u.pin_hash)E(401,'Invalid phone or PIN');if(u.locked_until>Date.now())E(423,'Account locked, try again later');if(!okPin(pin,u.pin_hash)){run('update users set pin_fails=pin_fails+1,locked_until=case when pin_fails+1>=5 then cast(? as bigint) else 0 end where id=?',Date.now()+9e5,u.id);audit(u.id,'auth.fail','user',u.id);E(401,'Invalid phone or PIN')}
  if(portal&&!(portal=='manager'?['manager','accountant'].includes(u.role):u.role==portal))E(403,'This account belongs to a different portal');
  run('update users set pin_fails=0,locked_until=0,verified=1 where id=?',u.id);const t=cr.randomBytes(32).toString('hex'),ttl=(STAFF.includes(u.role)?+process.env.STAFF_TTL_H||12:+process.env.TOKEN_TTL_H||168)*36e5,created=Date.now();run('insert into sessions(hash,user_id,expires,created,ua,last_activity) values(?,?,?,?,?,?)',sha(t),u.id,created+ttl,created,(req.get('user-agent')||'').slice(0,100),created);audit(u.id,'auth.login','user',u.id);return{token:t,expiresAt:created+ttl,lastActivityAt:created,user:{id:u.id,phone:u.phone,name:u.name,role:u.role,station_id:u.station_id,tenant_id:u.tenant_id}}}));
 api.post('/auth/verify-otp',SH(async req=>{const phone=normalizePhone(req.body.phone),code=req.body.code,pin=req.body.pin;limit('v:'+req.ip,30,36e5);if(!phone)E(400,'Invalid phone number');const u=one('select * from users where phone=?',phone),o=one('select * from otps where phone=?',phone);
@@ -324,7 +331,7 @@ api.post('/auth/verify-otp',SH(async req=>{const phone=normalizePhone(req.body.p
   if(o.purpose=='register')run('update users set ghana_card_verified=1,ghana_card_verified_at=? where id=?',new Date().toISOString(),u.id);
   if(o.purpose=='reset-pin')run('update sessions set revoked=1 where user_id=?',u.id);
  }else if(STAFF.includes(u.role)){
-  if(!p)E(401,'Staff PIN required');if(!okPin(p,u.pin_hash)){run('update users set pin_fails=pin_fails+1,locked_until=case when pin_fails+1>=5 then ? else 0 end where id=?',Date.now()+9e5,u.id);audit(u.id,'auth.fail','user',u.id);E(401,'Staff PIN incorrect')}
+  if(!p)E(401,'Staff PIN required');if(!okPin(p,u.pin_hash)){run('update users set pin_fails=pin_fails+1,locked_until=case when pin_fails+1>=5 then cast(? as bigint) else 0 end where id=?',Date.now()+9e5,u.id);audit(u.id,'auth.fail','user',u.id);E(401,'Staff PIN incorrect')}
   run('update users set pin_hash=?,pin_fails=0,locked_until=0 where id=?',hashPin(p),u.id);
  }else if(p){run('update users set pin_hash=?,pin_fails=0,locked_until=0 where id=?',hashPin(p),u.id);}
  run('delete from otps where phone=?',phone);run('update users set pin_fails=0,locked_until=0,verified=1 where id=?',u.id);
@@ -409,16 +416,16 @@ api.get('/me/activity-summary',P,H(req=>{
  const now=new Date(),weekStart=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate()-(now.getUTCDay()+6)%7)),nextWeek=new Date(weekStart.getTime()+7*864e5),
   monthStart=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),1)),nextMonth=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth()+1,1)),
   day=d=>d.toISOString().slice(0,10),uid=req.u.id;
- const rides=one(`select count(*) totalRides,coalesce(sum(seats),0) totalSeats,
-  coalesce(sum(case when date>=? and date<? then 1 else 0 end),0) weekRides,
-  coalesce(sum(case when date>=? and date<? then seats else 0 end),0) weekSeats,
-  coalesce(sum(case when date>=? and date<? then 1 else 0 end),0) monthRides,
-  coalesce(sum(case when date>=? and date<? then seats else 0 end),0) monthSeats,
-  coalesce(sum(case when status in('Queued','Assigned','Confirmed') then 1 else 0 end),0) activeRides
+ const rides=one(`select count(*) as "totalRides",coalesce(sum(seats),0) as "totalSeats",
+  coalesce(sum(case when date>=? and date<? then 1 else 0 end),0) as "weekRides",
+  coalesce(sum(case when date>=? and date<? then seats else 0 end),0) as "weekSeats",
+  coalesce(sum(case when date>=? and date<? then 1 else 0 end),0) as "monthRides",
+  coalesce(sum(case when date>=? and date<? then seats else 0 end),0) as "monthSeats",
+  coalesce(sum(case when status in('Queued','Assigned','Confirmed') then 1 else 0 end),0) as "activeRides"
   from bookings where passenger_id=?`,day(weekStart),day(nextWeek),day(weekStart),day(nextWeek),day(monthStart),day(nextMonth),day(monthStart),day(nextMonth),uid);
- const groups=one(`select count(*) total,coalesce(sum(status='Pending'),0) pending,
-  coalesce(sum(case when date>=? and date<? then 1 else 0 end),0) weekRequests,
-  coalesce(sum(case when date>=? and date<? then 1 else 0 end),0) monthRequests
+ const groups=one(`select count(*) total,coalesce(sum(case when status='Pending' then 1 else 0 end),0) pending,
+  coalesce(sum(case when date>=? and date<? then 1 else 0 end),0) as "weekRequests",
+  coalesce(sum(case when date>=? and date<? then 1 else 0 end),0) as "monthRequests"
   from excl where passenger_id=?`,day(weekStart),day(nextWeek),day(monthStart),day(nextMonth),uid),
   weeklyPlans=one("select count(*) n from recurring where passenger_id=? and status='Active'",uid).n;
  return{...rides,totalGroupRequests:groups.total,weekRequests:groups.weekRequests,monthRequests:groups.monthRequests,pendingGroupRequests:groups.pending,activeWeeklyPlans:weeklyPlans,inProgress:rides.activeRides+groups.pending};
@@ -480,7 +487,7 @@ api.get('/drivers/me/availability',DR,H(r=>({weekly:q('select * from availabilit
 api.get('/drivers/me/dispatch-overview',DR,H(req=>{
  const driver=one('select station_id from drivers where user_id=?',req.u.id),today=new Date().toISOString().slice(0,10);
  if(!driver?.station_id)return{queue:[],waitingPassengers:0};
- const queue=q(`select r.name route,b.date,count(*) requests,sum(b.seats) passengers from bookings b join routes r on r.id=b.route_id where b.status='Queued' and b.payment_status in${DISPATCHABLE_SQL} and r.origin_id=? and b.date>=? group by b.route_id,b.date order by b.date,r.name`,driver.station_id,today);
+ const queue=q(`select r.name route,b.date,count(*) requests,sum(b.seats) passengers from bookings b join routes r on r.id=b.route_id where b.status='Queued' and b.payment_status in${DISPATCHABLE_SQL} and r.origin_id=? and b.date>=? group by b.route_id,b.date,r.name order by b.date,r.name`,driver.station_id,today);
  return{queue,waitingPassengers:queue.reduce((sum,row)=>sum+row.passengers,0)};
 }));
 api.post('/drivers/me/availability-exceptions',DR,H(req=>{const{startAt,endAt,reason}=req.body;if(!/^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d$/.test(startAt||'')||!/^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d$/.test(endAt||'')||!validDateTime(startAt.slice(0,10),startAt.slice(11))||!validDateTime(endAt.slice(0,10),endAt.slice(11))||startAt>=endAt||!String(reason||'').trim())E(400,'Valid startAt<endAt and reason required');
@@ -499,7 +506,7 @@ api.get('/manager/dashboard',mgr,H(req=>{const rs=scope(req.u),routeIds=rs.join(
  const settlements=q("select t.id,t.route_id,t.dep_at,t.status,r.name route,u.name driver from trips t join routes r on r.id=t.route_id join users u on u.id=t.driver_id where t.status='Completed' and t.settlement_confirmed_at is null").filter(inr);
  settlements.forEach(t=>{t.assignments=q("select a.booking_id,a.seats,a.onboard_confirmed,b.ref,b.payment_status,u.name passenger from assignments a join bookings b on b.id=a.booking_id join users u on u.id=b.passenger_id where a.trip_id=? and a.status in('Boarded','Completed')",t.id)});
  return{queue,queueSeats:queue.reduce((sum,b)=>sum+b.seats,0),queueBookings:queue.length,
- demand:q(`select r.name route,b.date,b.arrival,sum(b.seats) seats from bookings b join routes r on r.id=b.route_id where b.route_id in(${routeIds}) and b.status in('Queued','Assigned','Confirmed') group by b.route_id,b.date,b.arrival`),
+ demand:q(`select r.name route,b.date,b.arrival,sum(b.seats) seats from bookings b join routes r on r.id=b.route_id where b.route_id in(${routeIds}) and b.status in('Queued','Assigned','Confirmed') group by b.route_id,r.name,b.date,b.arrival`),
  tripCounts:{standby:trips.filter(t=>t.status=='Planned').length,loading:trips.filter(t=>t.status=='Loading').length,away:trips.filter(t=>['Departed','Delayed'].includes(t.status)).length},
  vehicleCounts:{available:vehicles.filter(v=>!v.deleted_at&&v.status=='Available'&&v.docs_ok&&v.verified).length,loading:vehicles.filter(v=>!v.deleted_at&&v.status=='Loading').length,away:vehicles.filter(v=>!v.deleted_at&&['OnRound','Returning'].includes(v.status)).length},
  requests:q(`select b.ref,b.date,b.arrival,b.seats,b.status,b.payment_status,r.name route,u.name passenger from bookings b join routes r on r.id=b.route_id join users u on u.id=b.passenger_id where b.route_id in(${routeIds}) and b.status not in('Completed','Cancelled','NoShow') order by b.id desc limit 100`),
@@ -689,7 +696,7 @@ api.put('/admin/platform-settings',AD,H(req=>{
  })();
  return{ok:1}
 }));
-api.get('/reports/daily-operations',mgr,H(req=>{const ids=scope(req.u).join(',')||0;return rep(req,q(`select substr(t.dep_at,1,10) day,t.status,count(*) trips from trips t join routes r on r.id=t.route_id where r.id in(${ids}) group by 1,2`))}));
+api.get('/reports/daily-operations',mgr,H(req=>{const ids=scope(req.u).join(',')||0;return rep(req,q(`select substr(t.dep_at,1,10) as "day",t.status,count(*) trips from trips t join routes r on r.id=t.route_id where r.id in(${ids}) group by 1,2`))}));
 // ---- v1.2 additions ----
 const fs=require('fs'),path=require('path'),UP=path.resolve(__dirname,process.env.UPLOAD_DIR||'uploads');fs.mkdirSync(UP,{recursive:true});
 const pg=req=>{const l=Math.min(+req.query.limit||20,100);return[l,((+req.query.page||1)-1)*l]};
@@ -755,8 +762,8 @@ api.post('/admin/users',AD,H(req=>{const role=req.body.role,phone=normalizePhone
 api.post('/admin/managers',AD,H(req=>{const phone=normalizePhone(req.body.phone),name=String(req.body.name||'').trim(),stationId=Number(req.body.stationId),pin=req.body.pin;if(!phone||!name||!Number.isInteger(stationId)||!tenantForStation(stationId)||String(pin||'').length<6)E(400,'phone, name, valid stationId, pin (6+ chars) required');return{id:run('insert into users(phone,name,role,station_id,verified,pin_hash) values(?,?,?,?,?,?)',phone,name,'manager',stationId,1,hashPin(pin)).lastInsertRowid}}));
 // reports (CSV via ?format=csv, date range via ?from=&to=)
 const rng=req=>[req.query.from||'0000-01-01',req.query.to||'9999-12-31'];
-api.get('/reports/route-demand',mgr,H(req=>{const[f,t]=rng(req),rs=scope(req.u).join(',')||0;return rep(req,q(`select r.name route,b.date,substr(b.arrival,1,2)||':00' hour,count(*) bookings,sum(b.seats) seats,sum(b.status='Completed') completed,sum(b.status='Cancelled') cancelled,sum(b.status='NoShow') no_shows,sum(b.status='Queued') waiting from bookings b join routes r on r.id=b.route_id where b.route_id in(${rs}) and b.date between ? and ? group by b.route_id,b.date,substr(b.arrival,1,2) order by b.date`,f,t))}));
-api.get('/reports/driver-utilisation',mgr,H(req=>{const[f,t]=rng(req),rs=scope(req.u).join(',')||0;return rep(req,q(`select u.name driver,v.reg,count(*) trips,sum(t.status='Completed') completed,sum(t.status='Breakdown') breakdowns,coalesce(sum((select sum(a.seats) from assignments a where a.trip_id=t.id and a.status='Boarded')),0) seats_carried,round(count(*)*${DUR}/60.0,1) scheduled_hours from trips t join users u on u.id=t.driver_id join vehicles v on v.id=t.vehicle_id where t.route_id in(${rs}) and substr(t.dep_at,1,10) between ? and ? group by t.driver_id,t.vehicle_id`,f,t))}));
+api.get('/reports/route-demand',mgr,H(req=>{const[f,t]=rng(req),rs=scope(req.u).join(',')||0;return rep(req,q(`select r.name route,b.date,substr(b.arrival,1,2)||':00' as "hour",count(*) bookings,sum(b.seats) seats,sum(case when b.status='Completed' then 1 else 0 end) completed,sum(case when b.status='Cancelled' then 1 else 0 end) cancelled,sum(case when b.status='NoShow' then 1 else 0 end) no_shows,sum(case when b.status='Queued' then 1 else 0 end) waiting from bookings b join routes r on r.id=b.route_id where b.route_id in(${rs}) and b.date between ? and ? group by b.route_id,r.name,b.date,substr(b.arrival,1,2) order by b.date`,f,t))}));
+api.get('/reports/driver-utilisation',mgr,H(req=>{const[f,t]=rng(req),rs=scope(req.u).join(',')||0;return rep(req,q(`select u.name driver,v.reg,count(*) trips,sum(case when t.status='Completed' then 1 else 0 end) completed,sum(case when t.status='Breakdown' then 1 else 0 end) breakdowns,coalesce(sum((select sum(a.seats) from assignments a where a.trip_id=t.id and a.status='Boarded')),0) seats_carried,round(count(*)*${DUR}/60.0,1) scheduled_hours from trips t join users u on u.id=t.driver_id join vehicles v on v.id=t.vehicle_id where t.route_id in(${rs}) and substr(t.dep_at,1,10) between ? and ? group by t.driver_id,t.vehicle_id,u.name,v.reg`,f,t))}));
 // ---- v1.4 additions ----
 function moveTrip(id,time,date,reason,u,delayed){const t=one('select * from trips where id=?',id);if(!t||!['Planned','Loading','Delayed'].includes(t.status))E(409,'Trip cannot be rescheduled now');inScope(u,t.route_id);
  const as=q('select a.id,b.passenger_id,b.ref,b.arrival,b.route_id from assignments a join bookings b on b.id=a.booking_id where a.trip_id=? and a.status in'+ACTIVE,id),od=t.dep_at.slice(0,10),d=date||od;if(!validDateTime(d,time))E(400,'Bad date/time');
@@ -823,8 +830,8 @@ api.post('/me/pin',H(req=>{const{oldPin,newPin}=req.body;if(!STAFF.includes(req.
 const TV=process.env.TERMS_VERSION||'1';let lastJob=Date.now(),smsFails=0;const alertLast=new Map();
 async function alertOps(key,msg){if(Date.now()-(alertLast.get(key)||0)<(+process.env.ALERT_COOLDOWN_MIN||60)*6e4)return;alertLast.set(key,Date.now());console.error('[ALERT]',msg);
  if(process.env.ALERT_WEBHOOK)await fetch(process.env.ALERT_WEBHOOK,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'Transport: '+msg,content:'Transport: '+msg}),signal:AbortSignal.timeout(8000)}).catch(e=>console.error('alert webhook failed',e.message))}
-function health(){const c={};try{one('select 1 x');c.db='ok'}catch(e){c.db='FAIL: '+e.message}
- const bf=fs.existsSync(BK)?fs.readdirSync(BK).filter(x=>x.endsWith('.db')).sort().pop():null,age=bf?(Date.now()-fs.statSync(path.join(BK,bf)).mtimeMs)/36e5:null;
+function health(){const c={};try{one('select 1 x');c.db=`ok (${DB_BACKEND})`}catch(e){c.db='FAIL: '+e.message}
+ const backupExt=DB_BACKEND==='postgres'?'.dump':'.db',bf=fs.existsSync(BK)?fs.readdirSync(BK).filter(x=>x.endsWith(backupExt)).sort().pop():null,age=bf?(Date.now()-fs.statSync(path.join(BK,bf)).mtimeMs)/36e5:null;
  c.backup=age==null?'FAIL: no backup yet':age>(+process.env.BACKUP_EVERY_H||6)*2+1?`FAIL: last backup ${age.toFixed(1)}h ago`:`ok (${age.toFixed(1)}h ago)`;
  const old=one("select min(at) a from notifications where status in('Pending','Retrying')").a,failed=one("select count(*) n from notifications where status='Failed' and at>?",new Date(Date.now()-36e5).toISOString().slice(0,16)).n;
  c.messaging=failed>=(+process.env.ALERT_FAILED||5)?`FAIL: ${failed} messages failed in the last hour`:old&&Date.now()-new Date(old+'Z')>9e5?'FAIL: messages stuck for over 15 minutes':'ok';
@@ -1080,7 +1087,7 @@ const accountingRows=(req,format)=>{const{from,to}=accountingRange(req),scope=ac
  for(const[type,sql,alias]of sourceChecks){const scoped=accountingScope(req,{tenant:`${alias}.tenant_id`,organization:`${alias}.organization_id`,station:alias=='r'?`${alias}.origin_id`:`${alias}.station_id`});const sourceTable=type=='booking_payment'?'booking_payments':type=='driver_payout'?'driver_payouts':'fee_collections',sourceAlias=type=='booking_payment'?'p':type=='driver_payout'?'p':'c';unposted.push(...q(`${sql} where ${sourceAlias}.status='Succeeded' and substr(${sourceAlias}.updated_at,1,10) between ? and ? and ${scoped.sql} and not exists(select 1 from ledger_transactions lt where lt.source_type=? and lt.source_id=cast(${sourceAlias}.id as text)) order by ${sourceAlias}.id limit 100`,from,to,...scoped.args,type).map(row=>({...row,amount_pesewas:row.amount_pesewas,source_table:sourceTable})))}
  const cashScope=accountingScope(req,{tenant:'station.tenant_id',organization:'b.organization_id',station:'fr.station_id'}),cashUnposted=q(`select 'cash_fee_receivable' source_type,fr.id source_id,b.ref reference,fr.station_pesewas+fr.platform_pesewas+fr.loading_pesewas amount_pesewas,fr.created_at effective_at from fee_receivables fr join bookings b on b.id=fr.booking_id join stations station on station.id=fr.station_id where fr.station_pesewas+fr.platform_pesewas+fr.loading_pesewas>0 and substr(fr.created_at,1,10) between ? and ? and ${cashScope.sql} and not exists(select 1 from ledger_transactions lt where lt.source_type='cash_fee_receivable' and lt.source_id=cast(fr.id as text)) order by fr.id limit 100`,from,to,...cashScope.args);unposted.push(...cashUnposted.map(row=>({...row,source_table:'fee_receivables'})));
  const adjustmentScope=accountingScope(req,{tenant:'station.tenant_id',organization:'b.organization_id',station:'fr.station_id'}),adjustmentUnposted=q(`select 'fee_adjustment' source_type,a.id source_id,b.ref reference,a.amount_pesewas,a.created_at effective_at from fee_allocations a join fee_receivables fr on fr.id=a.receivable_id join bookings b on b.id=fr.booking_id join stations station on station.id=fr.station_id where a.kind in('waiver','manual_settlement') and substr(a.created_at,1,10) between ? and ? and ${adjustmentScope.sql} and not exists(select 1 from ledger_transactions lt where lt.source_type='fee_adjustment' and lt.source_id=cast(a.id as text)) order by a.id limit 100`,from,to,...adjustmentScope.args);unposted.push(...adjustmentUnposted.map(row=>({...row,source_table:'fee_allocations'})));
- const broken=q(`select t.id,t.source_type,t.source_id,sum(e.debit_pesewas) debits_pesewas,sum(e.credit_pesewas) credits_pesewas from ledger_transactions t join ledger_entries e on e.transaction_id=t.id where ${where} group by t.id having debits_pesewas!=credits_pesewas`,...args);
+ const broken=q(`select t.id,t.source_type,t.source_id,sum(e.debit_pesewas) debits_pesewas,sum(e.credit_pesewas) credits_pesewas from ledger_transactions t join ledger_entries e on e.transaction_id=t.id where ${where} group by t.id having sum(e.debit_pesewas)!=sum(e.credit_pesewas)`,...args);
  const income=periodAccounts.filter(row=>row.account_type=='revenue').reduce((sum,row)=>sum+row.amount_pesewas,0),expenses=periodAccounts.filter(row=>row.account_type=='expense').reduce((sum,row)=>sum+row.amount_pesewas,0);
  return{from,to,journal,accounts:balances,periodAccounts,income_pesewas:income,expenses_pesewas:expenses,net_pesewas:income-expenses,reconciliation:{unposted,unposted_count:unposted.length,unbalanced_transactions:broken.length,unallocated_receipts_pesewas:balances.find(row=>row.code=='2990')?.balance_pesewas||0}}
 };
@@ -1123,7 +1130,7 @@ function backfillAccountingLedger(){
 }
 backfillAccountingLedger();
 app.use('/api/v1',api);
-const bk=require('./backup'),BK=path.resolve(process.env.BACKUP_DIR||'backups'),backup=()=>bk.backup(db,BK,+process.env.BACKUP_KEEP||28);
+const bk=require('./backup'),BK=path.resolve(process.env.BACKUP_DIR||'backups'),backup=()=>DB_BACKEND==='postgres'?bk.backupPostgres(BK,+process.env.BACKUP_KEEP||28):bk.backup(db,BK,+process.env.BACKUP_KEEP||28);
 if(require.main===module){setInterval(()=>{try{jobs();lastJob=Date.now()}catch(e){console.error(e)}},+process.env.JOB_MS||10000);
  setInterval(()=>conns.forEach(s=>s.forEach(c=>c.res.write(': ping\n\n'))),25000).unref();
  const doBackup=()=>backup().then(f=>{console.log('backup',f);if(process.env.BACKUP_PING_URL)fetch(process.env.BACKUP_PING_URL).catch(()=>{})},e=>{console.error('BACKUP FAILED',e);alertOps('backup','BACKUP FAILED: '+e.message)});setInterval(doBackup,(+process.env.BACKUP_EVERY_H||6)*36e5).unref();setTimeout(doBackup,5000).unref();setInterval(retention,864e5).unref();setTimeout(retention,9000).unref();setInterval(expiryCheck,36e5).unref();setTimeout(expiryCheck,12000).unref();setInterval(watchdog,3e5).unref();

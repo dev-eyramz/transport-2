@@ -1,5 +1,7 @@
 // End-to-end test: node test.js
 const fs=require('fs'),os=require('os'),path=require('path'),TEST_ROOT=fs.mkdtempSync(path.join(os.tmpdir(),'transport-tests-'));
+const USE_POSTGRES=process.env.DB_BACKEND==='postgres';
+if(USE_POSTGRES)process.env.POSTGRES_SCHEMA='transport_test_'+process.pid;
 process.env.NODE_ENV='test';process.env.DB=':memory:';process.env.UPLOAD_DIR=path.join(TEST_ROOT,'upload-fixtures');process.env.NO_DEADLINE='1';process.env.SMS_PER_HOUR='1000';
 process.env.APP_SECRET='test-only-secret-for-transport-app-tests-000000000000';process.env.APP_BASE_URL='https://transport.test';
 process.env.SEED_ADMIN_PHONE='0200000002';process.env.SEED_ADMIN_PIN='123456';
@@ -347,12 +349,18 @@ assert.deepEqual(db.prepare("select kind,amount_pesewas from fee_ledger where bo
 assert.throws(()=>db.prepare('update fee_ledger set amount_pesewas=0 where booking_id=?').run(cashRide.j.id),/append-only/,'fee ledger rows cannot be changed');
 const feeCsv=await fetch(B+'/reports/fees?from=2000-01-01&to=2099-12-31&format=csv',{headers:{Authorization:'Bearer '+M}});assert.equal(feeCsv.status,200);assert.ok((await feeCsv.text()).includes('cash_settlement'),'fee report supports CSV export');
 // --- backup + verified restore ---
-const bf=await backup(),before=db.prepare('select count(*) n from users').get().n;assert.equal(restore(bf,path.join(TEST_ROOT,'restore-verification.sqlite')),before,'restore keeps data');const hh=health();assert.ok(hh.checks.db=='ok'&&hh.checks.backup.startsWith('ok'),'health after backup');assert.equal((await call('/admin/health','GET',null,A)).s,200);
-const prodEnv={...process.env,NODE_ENV:'production',APP_SECRET:'production-test-secret-with-at-least-thirty-two-characters',SMS_PROVIDER:'twilio',TWILIO_API_BASE_URL:'https://api.twilio.com',TWILIO_SID:'test-sid',TWILIO_TOKEN:'test-token',TWILIO_FROM:'+123456',PAYMENT_PROVIDER:'eganow',EGANOW_BASE_URL:'https://developer.sandbox.egacoreapi.com',EGANOW_API_USERNAME:'test-user',EGANOW_API_PASSWORD:'test-password',EGANOW_X_AUTH:'test-auth',DB:':memory:',UPLOAD_DIR:path.join(TEST_ROOT,'production-upload-fixtures'),BACKUP_DIR:path.join(TEST_ROOT,'production-backup-fixtures'),SEED_ADMIN_PHONE:'0200000099',SEED_ADMIN_PIN:'654321'};
+const bf=await backup(),before=db.prepare('select count(*) n from users').get().n;
+if(USE_POSTGRES){assert.ok(bf.endsWith('.dump'),'PostgreSQL backup is written in custom dump format');assert.ok(fs.statSync(bf).size>0,'PostgreSQL backup contains data')}
+else assert.equal(restore(bf,path.join(TEST_ROOT,'restore-verification.sqlite')),before,'restore keeps data');
+const hh=health();assert.ok(hh.checks.db.startsWith('ok')&&hh.checks.backup.startsWith('ok'),'health after backup');assert.equal((await call('/admin/health','GET',null,A)).s,200);
+const prodEnv={...process.env,DB_BACKEND:'sqlite',NODE_ENV:'production',APP_SECRET:'production-test-secret-with-at-least-thirty-two-characters',SMS_PROVIDER:'twilio',TWILIO_API_BASE_URL:'https://api.twilio.com',TWILIO_SID:'test-sid',TWILIO_TOKEN:'test-token',TWILIO_FROM:'+123456',PAYMENT_PROVIDER:'eganow',EGANOW_BASE_URL:'https://developer.sandbox.egacoreapi.com',EGANOW_API_USERNAME:'test-user',EGANOW_API_PASSWORD:'test-password',EGANOW_X_AUTH:'test-auth',DB:':memory:',UPLOAD_DIR:path.join(TEST_ROOT,'production-upload-fixtures'),BACKUP_DIR:path.join(TEST_ROOT,'production-backup-fixtures'),SEED_ADMIN_PHONE:'0200000099',SEED_ADMIN_PIN:'654321'};
 const missingSecret=spawnSync(process.execPath,['-e',"require('./server')"],{cwd:__dirname,env:{...process.env,APP_SECRET:''},encoding:'utf8'});
 assert.notEqual(missingSecret.status,0,'server refuses to start without an explicit signing secret');
 assert.ok(missingSecret.stderr.includes('APP_SECRET must be set'),'missing signing secret error is explicit');
-const missingAdmin=spawnSync(process.execPath,['-e',"require('./server')"],{cwd:__dirname,env:{...process.env,APP_SECRET:'test-only-secret-for-transport-app-tests-000000000000',DB:':memory:',SEED_ADMIN_PHONE:'',SEED_ADMIN_PIN:''},encoding:'utf8'});
+const insecurePostgres=spawnSync(process.execPath,['-e',"const {PostgresDatabase}=require('./postgres'); new PostgresDatabase(process.env.DATABASE_URL)"],{cwd:__dirname,env:{...process.env,NODE_ENV:'production',DATABASE_URL:'postgresql://test:test@db.example.invalid/transport'},encoding:'utf8'});
+assert.notEqual(insecurePostgres.status,0,'production refuses remote PostgreSQL without explicit TLS');
+assert.ok(insecurePostgres.stderr.includes('must require TLS'),'PostgreSQL connection errors state the TLS requirement');
+const missingAdmin=spawnSync(process.execPath,['-e',"require('./server')"],{cwd:__dirname,env:{...process.env,DB_BACKEND:'sqlite',APP_SECRET:'test-only-secret-for-transport-app-tests-000000000000',DB:':memory:',SEED_ADMIN_PHONE:'',SEED_ADMIN_PIN:''},encoding:'utf8'});
 assert.notEqual(missingAdmin.status,0,'fresh databases require explicit admin provisioning');
 assert.ok(missingAdmin.stderr.includes('Set SEED_ADMIN_PHONE'),'missing admin provisioning error is explicit');
 const prodProbe=spawnSync(process.execPath,['-e',"const {db}=require('./server'); console.log(db.prepare(\"select count(*) n from users where phone in ('0200000001','0200000002','0200664631','0245716396','0547620052')\").get().n); db.close()"],{cwd:__dirname,env:prodEnv,encoding:'utf8'});
@@ -364,4 +372,4 @@ assert.equal(providerSetup.status,0,'production starts without provider credenti
 const cashProdDB=path.join(TEST_ROOT,'production-cash.sqlite'),cashConfigDb=new D(cashProdDB);require('./migrate')(cashConfigDb);cashConfigDb.prepare("insert into config(scope,key,value) values('global','cash_enabled','1')").run();cashConfigDb.close();
 const cashProd=spawnSync(process.execPath,['-e',"require('./server'); console.log('cash enabled')"],{cwd:__dirname,env:{...prodEnv,DB:cashProdDB,FEES_EGANOW_BASE_URL:'',FEES_EGANOW_API_USERNAME:'',FEES_EGANOW_API_PASSWORD:'',FEES_EGANOW_X_AUTH:''},encoding:'utf8'});
 assert.equal(cashProd.status,0,'tenant-scoped app starts without global fee credentials: '+cashProd.stderr);assert.ok(cashProd.stdout.includes('cash enabled'),'cash routes no longer rely on global provider credentials');
-console.log('ALL TESTS PASSED');restorePaymentProvider();s.close(()=>{db.close();fs.rmSync(TEST_ROOT,{recursive:true,force:true});process.exit(0)})})().catch(e=>{console.error('FAIL',e);process.exit(1)});
+console.log('ALL TESTS PASSED');restorePaymentProvider();s.close(()=>{if(USE_POSTGRES)db.query(`DROP SCHEMA "${process.env.POSTGRES_SCHEMA}" CASCADE`);db.close();fs.rmSync(TEST_ROOT,{recursive:true,force:true});process.exit(0)})})().catch(e=>{console.error('FAIL',e);process.exit(1)});
