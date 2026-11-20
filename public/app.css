@@ -2815,3 +2815,61 @@ summary {
   :root[data-theme="system"] .status-indicator.is-ready { background: #4cc795; }
   :root[data-theme="system"] .app-header .theme-control .form-select { color-scheme: dark; }
 }
+.workspace-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: .55rem;
+  width: fit-content;
+  max-width: calc(100% - 2rem);
+  margin: .75rem auto;
+  padding: .5rem .85rem;
+  border: 1px solid var(--border, #dce3eb);
+  border-radius: 999px;
+  background: var(--surface, #fff);
+  color: var(--text-muted, #536273);
+  font-size: .875rem;
+}
+
+.workspace-loading[hidden] {
+  display: none;
+}
+
+.workspace-loading::before,
+.btn[aria-busy="true"]::after {
+  width: .9em;
+  height: .9em;
+  flex: 0 0 .9em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: workspace-spin .7s linear infinite;
+}
+
+.workspace-loading::before {
+  content: "";
+}
+
+.btn[aria-busy="true"] {
+  cursor: progress;
+}
+
+.btn[aria-busy="true"]::after {
+  display: inline-block;
+  margin-left: .5em;
+  content: "";
+  vertical-align: -.1em;
+}
+
+@keyframes workspace-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-loading::before,
+  .btn[aria-busy="true"]::after {
+    animation-duration: 1.8s;
+  }
+}
