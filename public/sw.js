@@ -1,4 +1,4 @@
-const S='shell-v18',A='api-v2',C='cdn';
+const S='shell-v19',A='api-v2',C='cdn';
 addEventListener('install',e=>e.waitUntil(caches.open(S).then(c=>c.addAll(['/','/manifest.json','/icon.svg','/vendor/bootstrap.min.css','/app-base.css','/app.css','/theme.js','/app.js','/terms.html','/terms.css'])).then(()=>skipWaiting())));
 addEventListener('activate',e=>e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>![S,A,C].includes(x)).map(x=>caches.delete(x)))).then(()=>clients.claim())));
 addEventListener('message',e=>{if(e.data=='clear')caches.delete(A)});
