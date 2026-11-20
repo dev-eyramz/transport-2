@@ -294,7 +294,9 @@ async function verifyGhanaCard(number,name,phone){
 const conns=new Map(),tix=new Map();
 function push(uid,ev){for(const c of conns.get(uid)||[])c.res.write(`event: ${ev}\ndata: 1\n\n`)}
 function pushStaff(){for(const s of conns.values())for(const c of s)if(STAFF.includes(c.role))c.res.write('event: refresh\ndata: 1\n\n')}
-api.use((req,res,n)=>{try{limit('api:'+req.ip,+process.env.API_PER_MIN||600,6e4)}catch(e){return res.status(429).json({error:e.message})}if(req.method!='GET')res.on('finish',()=>{if(res.statusCode<300)pushStaff()});n()});
+const STAFF_REFRESH_EXCLUDED_PATHS=new Set(['/auth/activity','/auth/login','/auth/logout','/auth/logout-all','/auth/request-otp','/events/ticket']);
+const shouldPushStaffRefresh=req=>req.method!=='GET'&&!STAFF_REFRESH_EXCLUDED_PATHS.has(req.path);
+api.use((req,res,n)=>{try{limit('api:'+req.ip,+process.env.API_PER_MIN||600,6e4)}catch(e){return res.status(429).json({error:e.message})}if(shouldPushStaffRefresh(req))res.on('finish',()=>{if(res.statusCode<300)pushStaff()});n()});
 api.post('/auth/request-otp',H(async req=>{const phone=normalizePhone(req.body.phone),name=String(req.body.name||'').trim(),role=req.body.role;if(!phone)E(400,'Invalid phone number');limit('ip:'+req.ip,20,36e5);limit('ph:'+phone,3,6e5);
  let user=one('select id,tenant_id,station_id,role,verified,pin_hash,deleted_at from users where phone=?',phone),purpose=req.body.purpose|| (user?'verify':'register');if(user?.deleted_at)E(403,'This account has been deactivated');
  if(!['register','verify','reset-pin'].includes(purpose))E(400,'Invalid OTP purpose');
@@ -1137,4 +1139,4 @@ if(require.main===module){setInterval(()=>{try{jobs();lastJob=Date.now()}catch(e
  const srv=app.listen(process.env.PORT||3000,()=>console.log('Transport system on :'+(process.env.PORT||3000)));
  for(const s of['SIGTERM','SIGINT'])process.on(s,()=>{srv.close(()=>{db.close();process.exit(0)});setTimeout(()=>process.exit(1),8000).unref()})}
 const paymentTesting=process.env.NODE_ENV=='test'?{setProviderForTests(provider){const previous=paymentProviderOverride;paymentProviderOverride=provider;return()=>{paymentProviderOverride=previous}},setIdentityVerifierForTests(verifier){const previous=identityVerifierOverride;identityVerifierOverride=verifier;return()=>{identityVerifierOverride=previous}}}:{};
-module.exports={app,jobs,db,backup,outbox,reminders,retention,noshowRule,expiryCheck,alertOps,health,...paymentTesting};
+module.exports={app,jobs,db,backup,outbox,reminders,retention,noshowRule,expiryCheck,alertOps,health,shouldPushStaffRefresh,...paymentTesting};
