@@ -13,12 +13,13 @@
   <link rel="stylesheet" href="/app.css">
 </head>
 <body class="bg-light">
+  <a class="skip-link" href="#app">Skip to workspace</a>
   <div id="toast-region" class="toast-region" aria-label="Notifications"></div>
   <dialog id="app-dialog" class="app-dialog"></dialog>
   <div class="transport-shell">
     <header id="hd" class="app-header" aria-label="Workspace header"></header>
     <div id="workspace-loading" class="workspace-loading" role="status" aria-live="polite" hidden>Loading workspace...</div>
-    <main id="app"></main>
+    <main id="app" tabindex="-1"></main>
     <footer id="off" class="network-status" role="status" aria-live="polite" hidden>You appear to be offline. Reconnect and try again.</footer>
   </div>
   <script src="/theme.js"></script>
