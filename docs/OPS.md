@@ -21,14 +21,14 @@
 - After changes, bump `TERMS_VERSION`; every passenger/driver must re-accept at next login.
 
 ## 4. Document expiry
-Drivers enter an expiry date with licence/insurance/roadworthy uploads. Warnings at 30 and 7 days (driver, then managers), and on the expiry date the document becomes Expired, a licence un-verifies the driver and a vehicle document revokes the vehicle's dispatch approval until a new document is verified.
+Drivers enter an expiry date with licence/insurance/roadworthy uploads. Warnings at 30 and 7 days (driver, then managers), and on the expiry date the document becomes Expired. A driver is automatically approved only while a valid licence and an approved vehicle with verified registration and insurance remain; expired documents revoke that approval or the affected vehicle's dispatch approval.
 
 ## 5. Fee-account setup and reconciliation
 - Configure each tenant's Eganow, SMS, and SMTP settings in Admin > API settings. Collections, payouts, and fee collections use the route tenant's Eganow credentials; SMS and WhatsApp use the notification tenant's settings. Missing tenant settings block provider calls, and unscoped notifications stay in-app.
 - Country code, language, and mobile-money partners are system-supplied Eganow payload defaults (`EGANOW_DEFAULT_COUNTRY_CODE`, `EGANOW_DEFAULT_LANGUAGE`, and `EGANOW_MOMO_PARTNERS`). These cannot be set in a tenant's API settings.
 - Provider credentials are encrypted with `APP_SECRET`. Use HTTPS for configured provider URLs in production, and keep `APP_SECRET` stable so saved tenant credentials remain decryptable.
 - On Render Free, tenant settings live in SQLite and can be lost on restart or spin-down. Use a persistent disk for durable settings.
-- Review `/reports/fees` by date and station. Match digital `rider_charge` and `driver_deduction` entries against provider settlement records; the fee ledger records the charges but does not initiate transfers to the fee account.
+- Review `/reports/fees` by date and station. Reconcile loading, station, and platform fee types separately against their payer/recipient allocations. In the accounting journal, revenue is credited to the recipient account (Platform, Tenant, or Organization), even when a tenant or organization funds a platform fee. Match digital `rider_charge` and `driver_deduction` entries against provider settlement records; the fee ledger records the charges but does not initiate transfers to the fee account.
 - For cash rides, reconcile `fee_receivables` and driver MoMo collections daily. Check pending/NeedsReview collections with the driver before retrying; successful status checks allocate oldest receivables first. Compare settled receivable amounts with `cash_settlement` ledger rows.
 - Record waivers or manual settlements with a reason. When `fee_manual_needs_approval=1`, a different station manager/accountant must approve; review the associated audit entry before closing the reconciliation period.
 - Investigate overdue notifications and outstanding balances before enabling `fee_block_cash`. That option prevents new cash assignments to drivers above `fee_max_outstanding_ghs`; digital dispatch remains unaffected.
