@@ -273,6 +273,19 @@ const managerUsers=manager=>q("select u.id,u.name,u.phone,u.role,u.station_id,u.
 const lim=new Map(),limit=(k,max,ms)=>{const n=Date.now(),a=(lim.get(k)||[]).filter(t=>n-t<ms);if(a.length>=max)E(429,'Too many attempts, please try later');a.push(n);lim.set(k,a)};
 setInterval(()=>{const n=Date.now();for(const[k,a]of lim)if(!a.some(t=>n-t<36e5))lim.delete(k)},6e5).unref();
 const sha=x=>cr.createHash('sha256').update(SECRET+x).digest('hex'),STAFF=['manager','accountant','porter','admin'];
+let invitationOtpRateCleanupAt=0;
+const limitInvitationOtp=(ip,phone,invitationKey,tenantId)=>{
+ const timestamp=Date.now();
+ if(timestamp-invitationOtpRateCleanupAt>=6e4){run('delete from invitation_otp_rate_limits where expires_at<=?',timestamp);invitationOtpRateCleanupAt=timestamp}
+ db.transaction(()=>{
+  const checks=[['ip',ip,10,6e5],['phone',phone,3,6e5],['invitation',invitationKey,20,6e5],['tenant-hourly',tenantId,100,36e5],['tenant-daily',tenantId,500,864e5]];
+  for(const[bucket,key,maximum,windowMs]of checks){
+   const windowStart=Math.floor(timestamp/windowMs)*windowMs;
+   const row=one(`insert into invitation_otp_rate_limits(bucket,subject_hash,window_start,hit_count,expires_at) values(?,?,?,?,?) on conflict(bucket,subject_hash,window_start) do update set hit_count=invitation_otp_rate_limits.hit_count+1 where invitation_otp_rate_limits.hit_count<? returning hit_count`,bucket,sha(`invite-otp:${bucket}:${key}`),windowStart,1,windowStart+windowMs,maximum);
+   if(!row)E(429,'Too many verification code requests. Try again later.')
+  }
+ })()
+};
 const normalizePhone=(value)=>{const raw=String(value==null?'':value).trim();if(!raw||/[A-Za-z@]/.test(raw))return'';const cleaned=raw.replace(/[^\d+]/g,'').replace(/^\+{2,}/,'+');if(!/^\+?\d+$/.test(cleaned))return'';const digits=cleaned.replace(/\+/g,'');if(digits.length<9||digits.length>15)return'';return cleaned.startsWith('+')?`+${digits}`:digits;};
 const normalizeGhanaCard=value=>{const compact=String(value||'').toUpperCase().replace(/[\s-]/g,'');if(!/^GHA\d{10}$/.test(compact))E(400,'Enter a valid Ghana Card number');return`GHA-${compact.slice(3,12)}-${compact.slice(12)}`};
 let identityVerifierOverride=null;
@@ -373,7 +386,24 @@ const validateApplication=(inv,body)=>{
 };
 const verifyInvitationOtp=(inv,phone,code)=>{const otp=one('select * from otps where phone=?',phone);if(!otp||otp.purpose!='invite:'+inv.id||otp.exp<Date.now())E(401,'Invalid or expired code');if(otp.attempts>=5){run('delete from otps where phone=?',phone);E(401,'Too many wrong codes; request a new one')}if(otp.code!=sha(phone+String(code))){run('update otps set attempts=attempts+1 where phone=?',phone);E(401,'Invalid or expired code')}run('delete from otps where phone=?',phone)};
 api.get('/onboarding/invitations/:token',H(req=>{const link=invitationLinkByToken(req.params.token);if(link){inviteTokenUsable(link,link.use_count>0);return{role:link.role,station:link.station_name,tenant:link.tenant_name,organization:link.organization_name,applicationExists:false}}const inv=invitationByToken(req.params.token),app=inv&&invitationApplication(inv.id);inviteTokenUsable(inv,app);return{role:inv.role,station:inv.station_name,tenant:inv.tenant_name,organization:inv.organization_name,applicationExists:!!app}}));
-api.post('/onboarding/invitations/:token/request-otp',H(async req=>{const phone=normalizePhone(req.body.phone);if(!phone)E(400,'Enter a valid phone number');const link=invitationLinkByToken(req.params.token);if(link){const existing=invitationForLinkApplicant(link,phone),application=existing&&invitationApplication(existing.id);inviteTokenUsable(link,application)}const inv=link?invitationForLinkApplicant(link,phone,true):invitationByToken(req.params.token),app=inv&&invitationApplication(inv.id);inviteTokenUsable(link||inv,app);if(inv.applicant_phone&&inv.applicant_phone!=phone)E(403,'This invitation is already bound to another phone number');if(app&&app.phone!=phone)E(403,'This application is bound to another phone number');if(!app&&one('select 1 x from users where phone=?',phone))E(409,'This phone number already belongs to an account');limit('invite:'+inv.id+':'+phone,3,6e5);const messaging=tenantProviderSettings(inv.tenant_id);if(!messaging.SMS_PROVIDER)E(503,'SMS is not configured for this tenant. Contact the tenant administrator.');const code=String(100000+cr.randomInt(900000));run('delete from otps where phone=?',phone);run('insert into otps(phone,code,exp,purpose) values(?,?,?,?)',phone,sha(phone+code),Date.now()+3e5,'invite:'+inv.id);const message=`Your transport application code is ${code}. Valid 5 minutes. Do not share it.`;try{await gw.sms(phone,message,{config:messaging,tenantId:inv.tenant_id})}catch(e){try{await gw.sms(phone,message,{config:messaging,tenantId:inv.tenant_id})}catch(e2){console.error('Invitation OTP send failed',e2.message);E(502,'Could not send SMS, try again')}}return{ok:1,applicationExists:!!app}}));
+api.post('/onboarding/invitations/:token/request-otp',H(async req=>{
+ const phone=normalizePhone(req.body.phone);if(!phone)E(400,'Enter a valid phone number');
+ const link=invitationLinkByToken(req.params.token),existing=link&&invitationForLinkApplicant(link,phone),inv=link?existing:invitationByToken(req.params.token),app=inv&&invitationApplication(inv.id),target=link||inv;
+ inviteTokenUsable(target,app);
+ if(inv?.applicant_phone&&inv.applicant_phone!=phone)E(403,'This invitation is already bound to another phone number');
+ if(app&&app.phone!=phone)E(403,'This application is bound to another phone number');
+ if(!app&&one('select 1 x from users where phone=?',phone))E(409,'This phone number already belongs to an account');
+ const tenantId=target.tenant_id,messaging=tenantProviderSettings(tenantId);
+ if(!messaging.SMS_PROVIDER)E(503,'SMS is not configured for this tenant. Contact the tenant administrator.');
+ const invitationKey=link?`link:${link.id}`:`legacy:${inv.id}`;
+ limitInvitationOtp(req.ip,phone,invitationKey,tenantId);
+ const applicantInvitation=inv||invitationForLinkApplicant(link,phone,true);
+ inviteTokenUsable(target,app);
+ const code=String(100000+cr.randomInt(900000));run('delete from otps where phone=?',phone);run('insert into otps(phone,code,exp,purpose) values(?,?,?,?)',phone,sha(phone+code),Date.now()+3e5,'invite:'+applicantInvitation.id);
+ const message=`Your transport application code is ${code}. Valid 5 minutes. Do not share it.`;
+ try{await gw.sms(phone,message,{config:messaging,tenantId})}catch(e){try{await gw.sms(phone,message,{config:messaging,tenantId})}catch(e2){console.error('Invitation OTP send failed',e2.message);E(502,'Could not send SMS, try again')}}
+ return{ok:1,applicationExists:!!app}
+}));
 api.post('/onboarding/invitations/:token/submit',H(req=>{const phone=normalizePhone(req.body.phone);if(!phone)E(400,'Enter a valid phone number');const link=invitationLinkByToken(req.params.token),inv=link?invitationForLinkApplicant(link,phone):invitationByToken(req.params.token),app=inv&&invitationApplication(inv.id);inviteTokenUsable(link||inv,app);if(!inv)E(404,'Invitation not found');if(inv.applicant_phone&&inv.applicant_phone!=phone||app&&app.phone!=phone)E(403,'This invitation is already bound to another phone number');if(app&&app.status!='needs_changes')E(409,app.status=='pending_review'?'Your application is awaiting review.':'This application cannot be resubmitted.');verifyInvitationOtp(inv,phone,req.body.code);const submitted=validateApplication(inv,req.body),oldPaths=[],newPaths=[];let applicationId;
  try{db.transaction(()=>{
   const updatedAt=new Date().toISOString();
@@ -797,7 +827,7 @@ api.post('/admin/drivers/onboard',AD,H(req=>{
  return{id,vehicleId,message:'Driver profile created. The driver must set a PIN by phone verification; documents remain pending station verification.'}
 }));
 api.post('/admin/users',AD,H(req=>{const role=req.body.role,phone=normalizePhone(req.body.phone),name=String(req.body.name||'').trim(),pin=String(req.body.pin||'');if(!['manager','accountant'].includes(role))E(400,['driver','porter'].includes(role)?'Use the admin manual driver form or scoped invitations.':role=='passenger'?'Passengers must complete phone and Ghana Card verification through registration.':'Only managers and accountants can be created directly.');if(!phone||!name||name.length>100||pin.length<6)E(400,'Valid phone, name (100 characters maximum), and PIN (6+ characters) required');const{stationId,tenantId,organizationId}=userTenantScope(role,req.body),id=run('insert into users(phone,name,role,station_id,tenant_id,organization_id,verified,pin_hash) values(?,?,?,?,?,?,?,?)',phone,name,role,stationId,tenantId,organizationId,1,hashPin(pin)).lastInsertRowid;audit(req.u.id,'user.create','user',id,{phone,name,role,stationId,tenantId,organizationId});return{id}}));
-api.post('/admin/managers',AD,H(req=>{const phone=normalizePhone(req.body.phone),name=String(req.body.name||'').trim(),stationId=Number(req.body.stationId),pin=req.body.pin;if(!phone||!name||!Number.isInteger(stationId)||!tenantForStation(stationId)||String(pin||'').length<6)E(400,'phone, name, valid stationId, pin (6+ chars) required');return{id:run('insert into users(phone,name,role,station_id,verified,pin_hash) values(?,?,?,?,?,?)',phone,name,'manager',stationId,1,hashPin(pin)).lastInsertRowid}}));
+api.post('/admin/managers',AD,H(req=>{const phone=normalizePhone(req.body.phone),name=String(req.body.name||'').trim(),stationId=Number(req.body.stationId),pin=req.body.pin;if(!phone||!name||!Number.isInteger(stationId)||!tenantForStation(stationId)||String(pin||'').length<6)E(400,'phone, name, valid stationId, pin (6+ chars) required');return db.transaction(()=>{const id=run('insert into users(phone,name,role,station_id,verified,pin_hash) values(?,?,?,?,?,?)',phone,name,'manager',stationId,1,hashPin(pin)).lastInsertRowid;audit(req.u.id,'user.create','user',id,{phone,name,role:'manager',stationId});return{id}})()}));
 // reports (CSV via ?format=csv, date range via ?from=&to=)
 const rng=req=>[req.query.from||'0000-01-01',req.query.to||'9999-12-31'];
 api.get('/reports/route-demand',mgr,H(req=>{const[f,t]=rng(req),rs=scope(req.u).join(',')||0;return rep(req,q(`select r.name route,b.date,substr(b.arrival,1,2)||':00' as "hour",count(*) bookings,sum(b.seats) seats,sum(case when b.status='Completed' then 1 else 0 end) completed,sum(case when b.status='Cancelled' then 1 else 0 end) cancelled,sum(case when b.status='NoShow' then 1 else 0 end) no_shows,sum(case when b.status='Queued' then 1 else 0 end) waiting from bookings b join routes r on r.id=b.route_id where b.route_id in(${rs}) and b.date between ? and ? group by b.route_id,r.name,b.date,substr(b.arrival,1,2) order by b.date`,f,t))}));
